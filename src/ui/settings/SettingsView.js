@@ -613,12 +613,13 @@ export class SettingsView extends LitElement {
         this.isLoading = true;
         try {
             // Load essential data first
-            const [userState, modelSettings, presets, contentProtection, shortcuts] = await Promise.all([
+            const [userState, modelSettings, presets, contentProtection, shortcuts, selectedPresetId] = await Promise.all([
                 window.api.settingsView.getCurrentUser(),
                 window.api.settingsView.getModelSettings(), // Facade call
                 window.api.settingsView.getPresets(),
                 window.api.settingsView.getContentProtectionStatus(),
-                window.api.settingsView.getCurrentShortcuts()
+                window.api.settingsView.getCurrentShortcuts(),
+                window.api.settingsView.getSelectedPreset()
             ]);
             
             if (userState && userState.isLoggedIn) this.firebaseUser = userState;
@@ -637,8 +638,20 @@ export class SettingsView extends LitElement {
             this.isContentProtectionOn = contentProtection;
             this.shortcuts = shortcuts || {};
             if (this.presets.length > 0) {
-                const firstUserPreset = this.presets.find(p => p.is_default === 0);
-                if (firstUserPreset) this.selectedPreset = firstUserPreset;
+                const persisted = selectedPresetId ? this.presets.find(p => p.id === selectedPresetId) : null;
+                if (persisted) {
+                    this.selectedPreset = persisted;
+                } else {
+                    const firstUserPreset = this.presets.find(p => p.is_default === 0);
+                    if (firstUserPreset) {
+                        const result = await window.api.settingsView.setSelectedPreset(firstUserPreset.id);
+                        if (result?.success) {
+                            this.selectedPreset = firstUserPreset;
+                        } else {
+                            console.error('[SettingsView] Failed to persist fallback preset selection:', result?.error);
+                        }
+                    }
+                }
             }
             
             // Load LocalAI status asynchronously to improve initial load time
@@ -972,15 +985,26 @@ export class SettingsView extends LitElement {
         this._presetsUpdatedListener = async (event) => {
             console.log('[SettingsView] Received presets-updated, refreshing presets');
             try {
-                const presets = await window.api.settingsView.getPresets();
+                const [presets, selectedPresetId] = await Promise.all([
+                    window.api.settingsView.getPresets(),
+                    window.api.settingsView.getSelectedPreset()
+                ]);
                 this.presets = presets || [];
-                
-                // 현재 선택된 프리셋이 삭제되었는지 확인 (사용자 프리셋만 고려)
-                const userPresets = this.presets.filter(p => p.is_default === 0);
-                if (this.selectedPreset && !userPresets.find(p => p.id === this.selectedPreset.id)) {
-                    this.selectedPreset = userPresets.length > 0 ? userPresets[0] : null;
+
+                const persisted = selectedPresetId ? this.presets.find(p => p.id === selectedPresetId) : null;
+                if (persisted) {
+                    this.selectedPreset = persisted;
+                } else {
+                    const userPresets = this.presets.filter(p => p.is_default === 0);
+                    const fallback = userPresets.length > 0 ? userPresets[0] : null;
+                    if (this.selectedPreset?.id !== fallback?.id) {
+                        this.selectedPreset = fallback;
+                        if (fallback) {
+                            await window.api.settingsView.setSelectedPreset(fallback.id);
+                        }
+                    }
                 }
-                
+
                 this.requestUpdate();
             } catch (error) {
                 console.error('[SettingsView] Failed to refresh presets:', error);
@@ -1090,8 +1114,11 @@ export class SettingsView extends LitElement {
 
     async handlePresetSelect(preset) {
         this.selectedPreset = preset;
-        // Here you could implement preset application logic
-        console.log('Selected preset:', preset);
+        try {
+            await window.api.settingsView.setSelectedPreset(preset ? preset.id : null);
+        } catch (error) {
+            console.error('Failed to persist selected preset:', error);
+        }
     }
 
     handleMoveLeft() {

@@ -102,10 +102,21 @@ class ModelStateService extends EventEmitter {
     }
 
     async handleLocalAIStateChange(service, state) {
-        console.log(`[ModelStateService] LocalAI state changed: ${service}`, state);
         if (!state.installed || !state.running) {
-            const types = service === 'ollama' ? ['llm'] : service === 'whisper' ? ['stt'] : [];
-            await this._autoSelectAvailableModels(types);
+            // Force re-selection only if the affected local service is the one currently in use.
+            // Without this guard, Ollama becoming unavailable would clobber an unrelated choice
+            // (e.g. an OpenRouter LLM selection) by triggering a blind auto-selection.
+            const types = [];
+            const selected = await this.getSelectedModels();
+            if (service === 'ollama' && this.getProviderForModel(selected.llm, 'llm') === 'ollama') {
+                types.push('llm');
+            }
+            if (service === 'whisper' && this.getProviderForModel(selected.stt, 'stt') === 'whisper') {
+                types.push('stt');
+            }
+            if (types.length > 0) {
+                await this._autoSelectAvailableModels(types);
+            }
         }
         this.emit('state-updated', await this.getLiveState());
     }

@@ -46,6 +46,19 @@ async function update({ uid, displayName }) {
     return { changes: 1 };
 }
 
+async function getSelectedPresetId(uid) {
+    const docRef = doc(usersCol(), uid);
+    const docSnap = await getDoc(docRef);
+    if (!docSnap.exists()) return null;
+    return docSnap.data().selected_preset_id || null;
+}
+
+async function setSelectedPresetId(uid, presetId) {
+    const docRef = doc(usersCol(), uid);
+    await setDoc(docRef, { selected_preset_id: presetId }, { merge: true });
+    return { changes: 1 };
+}
+
 async function deleteById(uid) {
     const db = getFirestoreInstance();
     const batch = writeBatch(db);
@@ -82,5 +95,7 @@ module.exports = {
     findOrCreate,
     getById,
     update,
+    getSelectedPresetId,
+    setSelectedPresetId,
     deleteById,
-}; 
+};

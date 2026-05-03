@@ -1,0 +1,15 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(grep -E \"\\\\.\\(js|ts\\)$\")",
+      "WebFetch(domain:openrouter.ai)",
+      "Bash(curl -s 'https://openrouter.ai/api/v1/models')",
+      "Bash(node -e \"let s='';process.stdin.on\\('data',d=>s+=d\\);process.stdin.on\\('end',\\(\\)=>{const j=JSON.parse\\(s\\);const ds=j.data.filter\\(m=>m.id.includes\\('deepseek'\\)\\);console.log\\('DEEPSEEK MODELS:'\\);ds.forEach\\(m=>console.log\\('  '+m.id+'  \\('+m.name+'\\)'\\)\\);console.log\\(\\);console.log\\('TOTAL MODELS:',j.data.length\\);}\\)\")",
+      "Bash(curl -sL 'https://openrouter.ai/api/v1/models' -o /tmp/or-models.json)",
+      "Read(//tmp/**)",
+      "Bash(node -e \"const j=require\\('/tmp/or-models.json'\\);const ds=j.data.filter\\(m=>m.id.includes\\('deepseek'\\)\\);console.log\\('DeepSeek models:'\\);ds.forEach\\(m=>console.log\\('  '+m.id+'  \\('+m.name+'\\)'\\)\\);\")",
+      "Bash(curl -sLk 'https://openrouter.ai/api/v1/models' -o /tmp/or-models.json)",
+      "Bash(node -e \"const j=require\\('/tmp/or-models.json'\\);const ds=j.data.filter\\(m=>m.id.toLowerCase\\(\\).includes\\('deepseek'\\)\\);console.log\\('DeepSeek models:'\\);ds.forEach\\(m=>console.log\\('  '+m.id+'  \\('+m.name+'\\)'\\)\\);console.log\\('total models:', j.data.length\\);\")"
+    ]
+  }
+}

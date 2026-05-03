@@ -4,6 +4,7 @@ const { createLLM } = require('../../common/ai/factory');
 const sessionRepository = require('../../common/repositories/session');
 const summaryRepository = require('./repositories');
 const modelStateService = require('../../common/services/modelStateService');
+const settingsService = require('../../settings/settingsService');
 
 class SummaryService {
     constructor() {
@@ -90,7 +91,8 @@ Please build upon this context while analyzing the new conversation segments.
 `;
         }
 
-        const basePrompt = getSystemPrompt('pickle_glass_analysis', '', false);
+        const userPresetText = await settingsService.getSelectedPresetPrompt();
+        const basePrompt = getSystemPrompt('pickle_glass_analysis', '', false, userPresetText || '');
         const systemPrompt = basePrompt.replace('{{CONVERSATION_HISTORY}}', recentConversation);
 
         try {
@@ -149,7 +151,7 @@ Keep all points concise and build upon previous analysis if provided.`,
             const completion = await llm.chat(messages);
 
             const responseText = completion.content;
-            console.log(`✅ Analysis response received: ${responseText}`);
+            console.log(`[SummaryService] Analysis response received (${responseText?.length || 0} chars)`);
             const structuredData = this.parseResponseText(responseText, this.previousAnalysisResult);
 
             if (this.currentSessionId) {
