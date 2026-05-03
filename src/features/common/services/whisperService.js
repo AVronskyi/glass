@@ -12,6 +12,9 @@ const { DOWNLOAD_CHECKSUMS } = require('../config/checksums');
 const execAsync = promisify(exec);
 
 const fsPromises = fs.promises;
+const DEFAULT_WINDOWS_WHISPER_DIR = 'F:\\programs\\Whisper';
+const WINDOWS_WHISPER_EXECUTABLES = ['whisper-whisper.exe', 'whisper-cli.exe', 'whisper.exe', 'main.exe'];
+const POSIX_WHISPER_EXECUTABLES = ['whisper', 'whisper-cli', 'main'];
 
 class WhisperService extends EventEmitter {
     constructor() {
@@ -19,6 +22,7 @@ class WhisperService extends EventEmitter {
         this.serviceName = 'WhisperService';
         
         // 경로 및 디렉토리
+        this.whisperBaseDir = null;
         this.whisperPath = null;
         this.modelsDir = null;
         this.tempDir = null;
@@ -59,6 +63,70 @@ class WhisperService extends EventEmitter {
         };
     }
 
+    normalizeConfiguredPath(value) {
+        if (!value || typeof value !== 'string') return null;
+
+        const trimmed = value.trim().replace(/^["']|["']$/g, '');
+        return trimmed ? path.normalize(trimmed) : null;
+    }
+
+    getConfiguredEnvPath(name) {
+        return this.normalizeConfiguredPath(process.env[name] || process.env[`pickleglass_${name.replace(/^PICKLE_/, '')}`]);
+    }
+
+    resolveWhisperBaseDir() {
+        const configuredDir = this.getConfiguredEnvPath('PICKLE_WHISPER_DIR');
+        if (configuredDir) return configuredDir;
+
+        if (this.getPlatform() === 'win32' && fs.existsSync(DEFAULT_WINDOWS_WHISPER_DIR)) {
+            return DEFAULT_WINDOWS_WHISPER_DIR;
+        }
+
+        return path.join(os.homedir(), '.glass', 'whisper');
+    }
+
+    resolveWhisperBinaryPath(whisperDir) {
+        const configuredBin = this.getConfiguredEnvPath('PICKLE_WHISPER_BIN');
+        if (configuredBin) return configuredBin;
+
+        const whisperExecutable = this.getPlatform() === 'win32' ? 'whisper-whisper.exe' : 'whisper';
+        return path.join(whisperDir, 'bin', whisperExecutable);
+    }
+
+    getLocalWhisperExecutableCandidates() {
+        if (!this.whisperBaseDir) return [];
+
+        const executableNames = this.getPlatform() === 'win32'
+            ? WINDOWS_WHISPER_EXECUTABLES
+            : POSIX_WHISPER_EXECUTABLES;
+        const searchDirs = [
+            this.whisperBaseDir,
+            path.join(this.whisperBaseDir, 'bin')
+        ];
+
+        const candidates = [this.whisperPath];
+        for (const dir of searchDirs) {
+            for (const executableName of executableNames) {
+                candidates.push(path.join(dir, executableName));
+            }
+        }
+
+        return [...new Set(candidates.filter(Boolean))];
+    }
+
+    async findLocalWhisperExecutable() {
+        for (const candidate of this.getLocalWhisperExecutableCandidates()) {
+            try {
+                await fsPromises.access(candidate, fs.constants.X_OK);
+                return candidate;
+            } catch (error) {
+                // Continue searching.
+            }
+        }
+
+        return null;
+    }
+
 
     // Base class methods integration
     getPlatform() {
@@ -70,7 +138,7 @@ class WhisperService extends EventEmitter {
             const platform = this.getPlatform();
             const checkCmd = platform === 'win32' ? 'where' : 'which';
             const { stdout } = await execAsync(`${checkCmd} ${command}`);
-            return stdout.trim();
+            return stdout.trim().split(/\r?\n/)[0] || null;
         } catch (error) {
             return null;
         }
@@ -277,22 +345,23 @@ class WhisperService extends EventEmitter {
         if (this.installState.isInitialized) return;
 
         try {
-            const homeDir = os.homedir();
-            const whisperDir = path.join(homeDir, '.glass', 'whisper');
+            const whisperDir = this.resolveWhisperBaseDir();
+            this.whisperBaseDir = whisperDir;
             
             this.modelsDir = path.join(whisperDir, 'models');
             this.tempDir = path.join(whisperDir, 'temp');
-            
-            // Windows에서는 .exe 확장자 필요
-            const platform = this.getPlatform();
-            const whisperExecutable = platform === 'win32' ? 'whisper-whisper.exe' : 'whisper';
-            this.whisperPath = path.join(whisperDir, 'bin', whisperExecutable);
+            this.whisperPath = this.resolveWhisperBinaryPath(whisperDir);
 
             await this.ensureDirectories();
             await this.ensureWhisperBinary();
             
             this.installState.isInitialized = true;
-            console.log('[WhisperService] Initialized successfully');
+            console.log('[WhisperService] Initialized successfully', {
+                baseDir: this.whisperBaseDir,
+                modelsDir: this.modelsDir,
+                tempDir: this.tempDir,
+                whisperPath: this.whisperPath
+            });
         } catch (error) {
             console.error('[WhisperService] Initialization failed:', error);
             // Emit error event - LocalAIManager가 처리
@@ -361,6 +430,13 @@ class WhisperService extends EventEmitter {
     }
 
     async ensureWhisperBinary() {
+        const localWhisperPath = await this.findLocalWhisperExecutable();
+        if (localWhisperPath) {
+            this.whisperPath = localWhisperPath;
+            console.log(`[WhisperService] Found local Whisper executable at: ${this.whisperPath}`);
+            return;
+        }
+
         const whisperCliPath = await this.checkCommand('whisper-cli');
         if (whisperCliPath) {
             this.whisperPath = whisperCliPath;
@@ -629,6 +705,14 @@ class WhisperService extends EventEmitter {
 
     async isInstalled() {
         try {
+            if (!this.whisperBaseDir) {
+                this.whisperBaseDir = this.resolveWhisperBaseDir();
+                this.whisperPath = this.resolveWhisperBinaryPath(this.whisperBaseDir);
+            }
+
+            const localWhisperPath = await this.findLocalWhisperExecutable();
+            if (localWhisperPath) return true;
+
             const whisperPath = await this.checkCommand('whisper-cli') || await this.checkCommand('whisper');
             return !!whisperPath;
         } catch (error) {

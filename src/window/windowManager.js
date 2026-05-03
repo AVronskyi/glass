@@ -257,7 +257,6 @@ function changeAllWindowsVisibility(windowPool, targetVisibility) {
  * @param {boolean} shouldBeVisible 
  */
 async function handleWindowVisibilityRequest(windowPool, layoutManager, movementManager, name, shouldBeVisible) {
-    console.log(`[WindowManager] Request: set '${name}' visibility to ${shouldBeVisible}`);
     const win = windowPool.get(name);
 
     if (!win || win.isDestroyed()) {
@@ -725,14 +724,6 @@ function createWindows() {
     if (!app.isPackaged) {
         header.webContents.openDevTools({ mode: 'detach' });
     }
-
-    header.on('focus', () => {
-        console.log('[WindowManager] Header gained focus');
-    });
-
-    header.on('blur', () => {
-        console.log('[WindowManager] Header lost focus');
-    });
 
     header.webContents.on('before-input-event', (event, input) => {
         if (input.type === 'mouseDown') {
