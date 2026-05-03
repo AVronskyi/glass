@@ -2,6 +2,8 @@ const { ipcMain, BrowserWindow } = require('electron');
 const Store = require('electron-store');
 const authService = require('../common/services/authService');
 const settingsRepository = require('./repositories');
+const userRepository = require('../common/repositories/user');
+const presetRepository = require('../common/repositories/preset');
 const { getStoredApiKey, getStoredProvider, windowPool } = require('../../window/windowManager');
 
 // New imports for common services
@@ -312,6 +314,43 @@ async function updatePreset(id, title, prompt) {
     }
 }
 
+async function getSelectedPresetId() {
+    try {
+        return await userRepository.getSelectedPresetId();
+    } catch (error) {
+        console.error('[SettingsService] Error getting selected preset id:', error);
+        return null;
+    }
+}
+
+async function setSelectedPreset(presetId) {
+    try {
+        await userRepository.setSelectedPresetId(presetId || null);
+        windowNotificationManager.notifyRelevantWindows('presets-updated', {
+            action: 'selected',
+            presetId: presetId || null
+        });
+        return { success: true };
+    } catch (error) {
+        console.error('[SettingsService] Error setting selected preset:', error);
+        return { success: false, error: error.message };
+    }
+}
+
+async function getSelectedPresetPrompt() {
+    try {
+        const presetId = await userRepository.getSelectedPresetId();
+        if (!presetId) return null;
+
+        const presets = await presetRepository.getPresets();
+        const match = (presets || []).find(p => p.id === presetId);
+        return match ? (match.prompt || null) : null;
+    } catch (error) {
+        console.error('[SettingsService] Error getting selected preset prompt:', error);
+        return null;
+    }
+}
+
 async function deletePreset(id) {
     try {
         // The adapter injects the UID.
@@ -451,6 +490,9 @@ module.exports = {
     createPreset,
     updatePreset,
     deletePreset,
+    getSelectedPresetId,
+    setSelectedPreset,
+    getSelectedPresetPrompt,
     saveApiKey,
     removeApiKey,
     updateContentProtection,

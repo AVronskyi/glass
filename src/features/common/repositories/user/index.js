@@ -40,6 +40,16 @@ const userRepositoryAdapter = {
         return getBaseRepository().update({ uid, ...updateData });
     },
 
+    getSelectedPresetId: () => {
+        const uid = getAuthService().getCurrentUserId();
+        return getBaseRepository().getSelectedPresetId(uid);
+    },
+
+    setSelectedPresetId: (presetId) => {
+        const uid = getAuthService().getCurrentUserId();
+        return getBaseRepository().setSelectedPresetId(uid, presetId);
+    },
+
     deleteById: () => {
         const uid = getAuthService().getCurrentUserId();
         return getBaseRepository().deleteById(uid);

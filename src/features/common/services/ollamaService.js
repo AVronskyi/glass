@@ -182,7 +182,6 @@ class OllamaService extends EventEmitter {
             
             return response.ok;
         } catch (error) {
-            console.log(`[OllamaService] Service health check failed: ${error.message}`);
             return false;
         }
     }

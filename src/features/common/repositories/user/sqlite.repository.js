@@ -48,6 +48,18 @@ function update({ uid, displayName }) {
     return { changes: result.changes };
 }
 
+function getSelectedPresetId(uid) {
+    const db = sqliteClient.getDb();
+    const row = db.prepare('SELECT selected_preset_id FROM users WHERE uid = ?').get(uid);
+    return row ? row.selected_preset_id : null;
+}
+
+function setSelectedPresetId(uid, presetId) {
+    const db = sqliteClient.getDb();
+    const result = db.prepare('UPDATE users SET selected_preset_id = ? WHERE uid = ?').run(presetId, uid);
+    return { changes: result.changes };
+}
+
 function setMigrationComplete(uid) {
     const db = sqliteClient.getDb();
     const stmt = db.prepare('UPDATE users SET has_migrated_to_firebase = 1 WHERE uid = ?');
@@ -87,6 +99,8 @@ module.exports = {
     findOrCreate,
     getById,
     update,
+    getSelectedPresetId,
+    setSelectedPresetId,
     setMigrationComplete,
     deleteById
-}; 
+};

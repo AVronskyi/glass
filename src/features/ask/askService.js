@@ -14,6 +14,7 @@ const getWindowPool = () => {
 
 const sessionRepository = require('../common/repositories/session');
 const askRepository = require('./repositories');
+const settingsService = require('../settings/settingsService');
 const { getSystemPrompt } = require('../common/prompts/promptBuilder');
 const path = require('node:path');
 const fs = require('node:fs');
@@ -253,8 +254,10 @@ class AskService {
             const screenshotBase64 = screenshotResult.success ? screenshotResult.base64 : null;
 
             const conversationHistory = this._formatConversationForPrompt(conversationHistoryRaw);
+            const userPresetText = await settingsService.getSelectedPresetPrompt();
+            console.log(`[AskService] User preset: ${userPresetText ? `applied (${userPresetText.length} chars)` : 'none'}`);
 
-            const systemPrompt = getSystemPrompt('pickle_glass_analysis', conversationHistory, false);
+            const systemPrompt = getSystemPrompt('pickle_glass_analysis', conversationHistory, false, userPresetText || '');
 
             const messages = [
                 { role: 'system', content: systemPrompt },
@@ -415,12 +418,15 @@ class AskService {
             this.state.currentResponse = fullResponse;
             this._broadcastState();
             if (fullResponse) {
+                console.log(`[AskService] LLM response received (${fullResponse.length} chars)`);
                  try {
                     await askRepository.addAiMessage({ sessionId, role: 'assistant', content: fullResponse });
-                    console.log(`[AskService] DB: Saved partial or full assistant response to session ${sessionId} after stream ended.`);
+                    console.log(`[AskService] DB: Saved assistant response (${fullResponse.length} chars) to session ${sessionId}.`);
                 } catch(dbError) {
                     console.error("[AskService] DB: Failed to save assistant response after stream ended:", dbError);
                 }
+            } else {
+                console.warn(`[AskService] Stream ended with EMPTY response. Provider may have rejected request silently or returned no content.`);
             }
         }
     }

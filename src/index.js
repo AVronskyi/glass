@@ -48,15 +48,19 @@ let pendingDeepLinkUrl = null;
 function setupProtocolHandling() {
     // Protocol registration - must be done before app is ready
     try {
-        if (!app.isDefaultProtocolClient('pickleglass')) {
-            const success = app.setAsDefaultProtocolClient('pickleglass');
-            if (success) {
-                console.log('[Protocol] Successfully set as default protocol client for pickleglass://');
-            } else {
-                console.warn('[Protocol] Failed to set as default protocol client - this may affect deep linking');
-            }
+        // In dev mode, electron.exe needs the script path passed explicitly,
+        // otherwise Windows launches `electron.exe pickleglass://...` and
+        // Electron treats the URL as the app path ("Cannot find module...").
+        let success;
+        if (process.defaultApp && process.argv.length >= 2) {
+            success = app.setAsDefaultProtocolClient('pickleglass', process.execPath, [path.resolve(process.argv[1])]);
         } else {
-            console.log('[Protocol] Already registered as default protocol client for pickleglass://');
+            success = app.setAsDefaultProtocolClient('pickleglass');
+        }
+        if (success) {
+            console.log('[Protocol] Successfully set as default protocol client for pickleglass://');
+        } else {
+            console.warn('[Protocol] Failed to set as default protocol client - this may affect deep linking');
         }
     } catch (error) {
         console.error('[Protocol] Error during protocol registration:', error);
@@ -401,6 +405,14 @@ function setupWebDataHandlers() {
                 case 'delete-preset':
                     // Adapter injects UID
                     result = await presetRepository.delete(payload);
+                    try {
+                        const activePresetId = await settingsService.getSelectedPresetId();
+                        if (activePresetId === payload) {
+                            await settingsService.setSelectedPreset(null);
+                        }
+                    } catch (err) {
+                        console.warn('[Index] Failed to clear selected preset after delete:', err.message);
+                    }
                     settingsService.notifyPresetUpdate('deleted', payload);
                     break;
                 
