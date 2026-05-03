@@ -1,19 +1,33 @@
-const { onAuthStateChanged, signInWithCustomToken, signOut } = require('firebase/auth');
+const { onAuthStateChanged, signInWithCustomToken: firebaseSignInWithCustomToken, signOut: firebaseSignOut } = require('firebase/auth');
 const { BrowserWindow, shell } = require('electron');
 const { getFirebaseAuth } = require('./firebaseClient');
 const fetch = require('node-fetch');
 const encryptionService = require('./encryptionService');
 const migrationService = require('./migrationService');
 const sessionRepository = require('../repositories/session');
-const providerSettingsRepository = require('../repositories/providerSettings');
 const permissionService = require('./permissionService');
+
+function isFirebaseEnabledFromEnv() {
+    const authMode = (process.env.PICKLE_AUTH_MODE || process.env.pickleglass_AUTH_MODE || '').trim().toLowerCase();
+    if (authMode) {
+        return authMode === 'firebase' || authMode === 'cloud';
+    }
+
+    const enabled = (process.env.PICKLE_ENABLE_FIREBASE || process.env.pickleglass_ENABLE_FIREBASE || '').trim().toLowerCase();
+    return enabled === '1' || enabled === 'true' || enabled === 'yes' || enabled === 'on';
+}
 
 async function getVirtualKeyByEmail(email, idToken) {
     if (!idToken) {
         throw new Error('Firebase ID token is required for virtual key request');
     }
 
-    const resp = await fetch('https://serverless-api-sf3o.vercel.app/api/virtual_key', {
+    const endpoint = process.env.PICKLE_VIRTUAL_KEY_ENDPOINT;
+    if (!endpoint) {
+        throw new Error('Virtual key endpoint is not configured (set PICKLE_VIRTUAL_KEY_ENDPOINT)');
+    }
+
+    const resp = await fetch(endpoint, {
         method: 'POST',
         headers: {
             'Content-Type': 'application/json',
@@ -41,6 +55,7 @@ class AuthService {
         this.currentUserMode = 'local'; // 'local' or 'firebase'
         this.currentUser = null;
         this.isInitialized = false;
+        this.firebaseEnabled = isFirebaseEnabledFromEnv();
 
         // This ensures the key is ready before any login/logout state change.
         this.initializationPromise = null;
@@ -48,8 +63,40 @@ class AuthService {
         sessionRepository.setAuthService(this);
     }
 
+    isFirebaseEnabled() {
+        return this.firebaseEnabled;
+    }
+
+    async _initializeLocalOnly() {
+        console.log('[AuthService] Firebase auth disabled. Using local-only mode.');
+        this.currentUser = null;
+        this.currentUserId = 'default_user';
+        this.currentUserMode = 'local';
+
+        await sessionRepository.endAllActiveSessions();
+        encryptionService.resetSessionKey();
+
+        if (global.modelStateService) {
+            try {
+                await global.modelStateService.setFirebaseVirtualKey(null);
+            } catch (error) {
+                console.warn('[AuthService] Failed to clear Firebase virtual key for local-only mode:', error.message);
+            }
+        }
+
+        this.broadcastUserState();
+        this.isInitialized = true;
+        console.log('[AuthService] Initialized in local-only mode.');
+    }
+
     initialize() {
         if (this.isInitialized) return this.initializationPromise;
+        if (this.initializationPromise) return this.initializationPromise;
+
+        if (!this.firebaseEnabled) {
+            this.initializationPromise = this._initializeLocalOnly();
+            return this.initializationPromise;
+        }
 
         this.initializationPromise = new Promise((resolve) => {
             const auth = getFirebaseAuth();
@@ -77,20 +124,27 @@ class AuthService {
                     // No 'await' here, so it runs in the background without blocking startup.
                     migrationService.checkAndRunMigration(user);
 
-                    // ***** CRITICAL: Wait for the virtual key and model state update to complete *****
-                    try {
-                        const idToken = await user.getIdToken(true);
-                        const virtualKey = await getVirtualKeyByEmail(user.email, idToken);
+                    if (process.env.PICKLE_VIRTUAL_KEY_ENDPOINT) {
+                        try {
+                            const idToken = await user.getIdToken(true);
+                            const virtualKey = await getVirtualKeyByEmail(user.email, idToken);
 
-                        if (global.modelStateService) {
-                            // The model state service now writes directly to the DB, no in-memory state.
-                            await global.modelStateService.setFirebaseVirtualKey(virtualKey);
+                            if (global.modelStateService) {
+                                await global.modelStateService.setFirebaseVirtualKey(virtualKey);
+                            }
+                            console.log(`[AuthService] Virtual key for ${user.email} has been processed and state updated.`);
+                        } catch (error) {
+                            console.error('[AuthService] Failed to fetch or save virtual key:', error);
                         }
-                        console.log(`[AuthService] Virtual key for ${user.email} has been processed and state updated.`);
-
-                    } catch (error) {
-                        console.error('[AuthService] Failed to fetch or save virtual key:', error);
-                        // This is not critical enough to halt the login, but we should log it.
+                    } else {
+                        if (global.modelStateService) {
+                            try {
+                                await global.modelStateService.setFirebaseVirtualKey(null);
+                            } catch (error) {
+                                console.warn('[AuthService] Failed to clear virtual key:', error.message);
+                            }
+                        }
+                        console.log('[AuthService] Virtual key flow disabled (no PICKLE_VIRTUAL_KEY_ENDPOINT); user signs in with their own API keys.');
                     }
 
                 } else {
@@ -126,6 +180,11 @@ class AuthService {
     }
 
     async startFirebaseAuthFlow() {
+        if (!this.firebaseEnabled) {
+            console.log('[AuthService] Firebase auth flow requested, but local-only mode is active.');
+            return { success: false, error: 'Firebase auth is disabled. Use personal API keys in local mode.' };
+        }
+
         try {
             const webUrl = process.env.pickleglass_WEB_URL || 'http://localhost:3000';
             const authUrl = `${webUrl}/login?mode=electron`;
@@ -139,9 +198,14 @@ class AuthService {
     }
 
     async signInWithCustomToken(token) {
+        if (!this.firebaseEnabled) {
+            console.log('[AuthService] Ignoring Firebase custom token because local-only mode is active.');
+            return { success: false, error: 'Firebase auth is disabled.' };
+        }
+
         const auth = getFirebaseAuth();
         try {
-            const userCredential = await signInWithCustomToken(auth, token);
+            const userCredential = await firebaseSignInWithCustomToken(auth, token);
             console.log(`[AuthService] Successfully signed in with custom token for user:`, userCredential.user.uid);
             // onAuthStateChanged will handle the state update and broadcast
         } catch (error) {
@@ -151,12 +215,23 @@ class AuthService {
     }
 
     async signOut() {
+        if (!this.firebaseEnabled) {
+            await sessionRepository.endAllActiveSessions();
+            this.currentUser = null;
+            this.currentUserId = 'default_user';
+            this.currentUserMode = 'local';
+            encryptionService.resetSessionKey();
+            this.broadcastUserState();
+            console.log('[AuthService] Local-only sign-out reset completed.');
+            return { success: true };
+        }
+
         const auth = getFirebaseAuth();
         try {
             // End all active sessions for the current user BEFORE signing out.
             await sessionRepository.endAllActiveSessions();
 
-            await signOut(auth);
+            await firebaseSignOut(auth);
             console.log('[AuthService] User sign-out initiated successfully.');
             // onAuthStateChanged will handle the state update and broadcast,
             // which will also re-evaluate the API key status.
@@ -189,6 +264,7 @@ class AuthService {
                 displayName: this.currentUser.displayName,
                 mode: 'firebase',
                 isLoggedIn: true,
+                firebaseEnabled: this.firebaseEnabled,
                 //////// before_modelStateService ////////
                 // hasApiKey: this.hasApiKey // Always true for firebase users, but good practice
                 //////// before_modelStateService ////////
@@ -200,6 +276,7 @@ class AuthService {
             displayName: 'Default User',
             mode: 'local',
             isLoggedIn: false,
+            firebaseEnabled: this.firebaseEnabled,
             //////// before_modelStateService ////////
             // hasApiKey: this.hasApiKey
             //////// before_modelStateService ////////

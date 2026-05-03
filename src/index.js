@@ -187,7 +187,11 @@ app.whenReady().then(async () => {
     });
 
     // Initialize core services
-    initializeFirebase();
+    if (authService.isFirebaseEnabled()) {
+        initializeFirebase();
+    } else {
+        console.log('[index.js] Firebase disabled; starting in local-only mode.');
+    }
     
     try {
         await databaseInitializer.initialize();
@@ -511,6 +515,11 @@ async function handleFirebaseAuthCallback(params) {
     const userRepository = require('./features/common/repositories/user');
     const { token: idToken } = params;
 
+    if (!authService.isFirebaseEnabled()) {
+        console.log('[Auth] Ignoring Firebase auth callback because local-only mode is active.');
+        return;
+    }
+
     if (!idToken) {
         console.error('[Auth] Firebase auth callback is missing ID token.');
         // No need to send IPC, the UI won't transition without a successful auth state change.
@@ -520,7 +529,7 @@ async function handleFirebaseAuthCallback(params) {
     console.log('[Auth] Received ID token from deep link, exchanging for custom token...');
 
     try {
-        const functionUrl = 'https://us-west1-pickle-3651a.cloudfunctions.net/pickleGlassAuthCallback';
+        const functionUrl = 'https://us-west1-glass-f347d.cloudfunctions.net/pickleGlassAuthCallback';
         const response = await fetch(functionUrl, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -530,6 +539,7 @@ async function handleFirebaseAuthCallback(params) {
         const data = await response.json();
 
         if (!response.ok || !data.success) {
+            console.error('[Auth] Cloud function rejected token. Status:', response.status, 'Body:', JSON.stringify(data));
             throw new Error(data.error || 'Failed to exchange token.');
         }
 

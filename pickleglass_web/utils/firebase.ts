@@ -5,13 +5,13 @@ import { getFirestore } from "firebase/firestore";
 // import { getAnalytics } from "firebase/analytics";
 
 const firebaseConfig = {
-  apiKey: "AIzaSyAgtJrmsFWG1C7m9S55HyT1laICEzuUS2g",
-  authDomain: "pickle-3651a.firebaseapp.com",
-  projectId: "pickle-3651a",
-  storageBucket: "pickle-3651a.firebasestorage.app",
-  messagingSenderId: "904706892885",
-  appId: "1:904706892885:web:0e42b3dda796674ead20dc",
-  measurementId: "G-SQ0WM6S28T"
+  apiKey: "AIzaSyAc5Y2KvEnPIg28hr9JngFE69nlbXMijAc",
+  authDomain: "glass-f347d.firebaseapp.com",
+  projectId: "glass-f347d",
+  storageBucket: "glass-f347d.firebasestorage.app",
+  messagingSenderId: "669754461081",
+  appId: "1:669754461081:web:bc251d5944e01ed90f6108",
+  measurementId: "G-8C1MN85HN7"
 };
 
 // Initialize Firebase

@@ -1,5 +1,7 @@
 import { html, css, LitElement } from '../assets/lit-core-2.7.4.min.js';
 
+const DEFAULT_WHISPER_STT_MODEL = 'whisper-base';
+
 export class ApiKeyHeader extends LitElement {
     //////// after_modelStateService ////////
     static properties = {
@@ -427,9 +429,11 @@ export class ApiKeyHeader extends LitElement {
         if (!window.api?.apiKeyHeader) return;
 
         try {
-            const [config, ollamaStatus] = await Promise.all([
+            const [config, ollamaStatus, storedKeys, selectedModels] = await Promise.all([
                 window.api.apiKeyHeader.getProviderConfig(),
                 window.api.apiKeyHeader.getOllamaStatus(),
+                window.api.apiKeyHeader.getAllKeys(),
+                window.api.apiKeyHeader.getSelectedModels(),
             ]);
 
             const llmProviders = [];
@@ -451,9 +455,19 @@ export class ApiKeyHeader extends LitElement {
 
             this.providers = { llm: llmProviders, stt: sttProviders };
 
-            // 기본 선택 값 설정
-            if (llmProviders.length > 0) this.llmProvider = llmProviders[0].id;
-            if (sttProviders.length > 0) this.sttProvider = sttProviders[0].id;
+            const selectedLlmProvider = this.getProviderForModel(config, selectedModels?.llm, 'llm');
+            const selectedSttProvider = this.getProviderForModel(config, selectedModels?.stt, 'stt');
+            const usableSelectedLlmProvider = this.providerCanBeUsedForSetup(selectedLlmProvider, 'llm', storedKeys) ? selectedLlmProvider : null;
+            const usableSelectedSttProvider = this.providerCanBeUsedForSetup(selectedSttProvider, 'stt', storedKeys) ? selectedSttProvider : null;
+            const configuredLlmProvider = this.getFirstConfiguredProvider(llmProviders, storedKeys);
+            const configuredSttProvider = this.getFirstConfiguredProvider(sttProviders, storedKeys);
+
+            this.llmProvider = usableSelectedLlmProvider || configuredLlmProvider || llmProviders[0]?.id || 'openai';
+            this.sttProvider = usableSelectedSttProvider || configuredSttProvider || 'whisper';
+            this.llmApiKey = storedKeys?.[this.llmProvider] === 'local' ? '' : storedKeys?.[this.llmProvider] || '';
+            this.sttApiKey = storedKeys?.[this.sttProvider] === 'local' ? '' : storedKeys?.[this.sttProvider] || '';
+            this.selectedLlmModel = this.llmProvider === 'ollama' ? selectedModels?.llm || this.selectedLlmModel : this.selectedLlmModel;
+            this.selectedSttModel = selectedModels?.stt || (this.sttProvider === 'whisper' ? DEFAULT_WHISPER_STT_MODEL : this.selectedSttModel);
 
             // Ollama 상태 및 모델 제안 로드
             if (ollamaStatus?.success) {
@@ -557,6 +571,36 @@ export class ApiKeyHeader extends LitElement {
         this.clearMessages();
         console.log('Provider changed to:', this.selectedProvider);
         this.requestUpdate();
+    }
+
+    getProviderForModel(config, modelId, type) {
+        if (!modelId || !config) return null;
+        const modelListKey = type === 'llm' ? 'llmModels' : 'sttModels';
+
+        for (const [providerId, providerConfig] of Object.entries(config)) {
+            const models = providerConfig?.[modelListKey] || [];
+            if (models.some(model => model.id === modelId)) {
+                return providerId;
+            }
+        }
+
+        return null;
+    }
+
+    providerHasStoredKey(storedKeys, providerId) {
+        const key = storedKeys?.[providerId];
+        return typeof key === 'string' && key.trim().length > 0;
+    }
+
+    providerCanBeUsedForSetup(providerId, type, storedKeys) {
+        if (!providerId) return false;
+        if (type === 'llm' && providerId === 'ollama') return true;
+        if (type === 'stt' && providerId === 'whisper') return true;
+        return this.providerHasStoredKey(storedKeys, providerId);
+    }
+
+    getFirstConfiguredProvider(providers, storedKeys) {
+        return providers.find(provider => this.providerHasStoredKey(storedKeys, provider.id))?.id || null;
     }
 
     async handleLlmProviderChange(e, providerId) {
@@ -809,6 +853,17 @@ export class ApiKeyHeader extends LitElement {
             if (whisperProvider) {
                 this.sttProvider = 'whisper';
                 console.log('[ApiKeyHeader] Auto-selected Whisper for STT');
+            }
+        }
+
+        if (this.sttProvider === 'whisper' && !this.selectedSttModel) {
+            this.selectedSttModel = DEFAULT_WHISPER_STT_MODEL;
+            console.log(`[ApiKeyHeader] Defaulted Whisper STT model to ${DEFAULT_WHISPER_STT_MODEL}`);
+            this.requestUpdate();
+            try {
+                await this.downloadWhisperModel(DEFAULT_WHISPER_STT_MODEL);
+            } catch (error) {
+                // Error already surfaced via this.sttError; user retries via submit.
             }
         }
 
@@ -1408,15 +1463,19 @@ export class ApiKeyHeader extends LitElement {
 
                 // Auto-select the downloaded model
                 this.selectedSttModel = modelId;
-            } else {
-                this.sttError = `*Failed to download ${modelId}: ${result?.error || 'Unknown error'}`;
-                this.messageTimestamp = Date.now();
-                console.error(`[ApiKeyHeader] Whisper download failed:`, result?.error);
+                return { success: true };
             }
+
+            const errorMessage = result?.error || 'Unknown error';
+            this.sttError = `*Failed to download ${modelId}: ${errorMessage}`;
+            this.messageTimestamp = Date.now();
+            console.error(`[ApiKeyHeader] Whisper download failed:`, errorMessage);
+            throw new Error(`Failed to download ${modelId}: ${errorMessage}`);
         } catch (error) {
             console.error(`[ApiKeyHeader] Error downloading Whisper model ${modelId}:`, error);
             this.sttError = `*Error downloading ${modelId}: ${error.message}`;
             this.messageTimestamp = Date.now();
+            throw error;
         } finally {
             // Cleanup
             if (progressHandler) {
@@ -1467,7 +1526,11 @@ export class ApiKeyHeader extends LitElement {
             const isInstalling = this.whisperInstallingModels[modelId] !== undefined;
             if (!isInstalling) {
                 console.log(`[ApiKeyHeader] Auto-installing Whisper model: ${modelId}`);
-                await this.downloadWhisperModel(modelId);
+                try {
+                    await this.downloadWhisperModel(modelId);
+                } catch (error) {
+                    // Error already surfaced via this.sttError; user retries via submit.
+                }
             }
         }
 
@@ -1551,7 +1614,12 @@ export class ApiKeyHeader extends LitElement {
                 // Ollama doesn't support STT yet, so skip or use same as LLM validation
                 sttResult = { success: true };
             } else if (this.sttProvider === 'whisper') {
-                // For Whisper, just validate it's enabled (model download already handled in handleSttModelChange)
+                if (!this.selectedSttModel) {
+                    this.selectedSttModel = DEFAULT_WHISPER_STT_MODEL;
+                }
+                await this.downloadWhisperModel(this.selectedSttModel);
+
+                // For Whisper, just validate it's enabled.
                 sttResult = await window.api.apiKeyHeader.validateKey({
                     provider: 'whisper',
                     key: 'local',

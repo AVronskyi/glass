@@ -16,6 +16,7 @@
     }
   ],
   "firestore": {
+    "database": "pickle-glass",
     "rules": "firestore.rules",
     "indexes": "firestore.indexes.json"
   },
