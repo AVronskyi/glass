@@ -483,6 +483,7 @@ export class SettingsView extends LitElement {
     static properties = {
         shortcuts: { type: Object, state: true },
         firebaseUser: { type: Object, state: true },
+        firebaseEnabled: { type: Boolean, state: true },
         isLoading: { type: Boolean, state: true },
         isContentProtectionOn: { type: Boolean, state: true },
         saving: { type: Boolean, state: true },
@@ -513,6 +514,7 @@ export class SettingsView extends LitElement {
         //////// after_modelStateService ////////
         this.shortcuts = {};
         this.firebaseUser = null;
+        this.firebaseEnabled = true;
         this.apiKeys = { openai: '', gemini: '', anthropic: '', whisper: '' };
         this.providerConfig = {};
         this.isLoading = true;
@@ -622,7 +624,8 @@ export class SettingsView extends LitElement {
                 window.api.settingsView.getSelectedPreset()
             ]);
             
-            if (userState && userState.isLoggedIn) this.firebaseUser = userState;
+            this.firebaseEnabled = userState?.firebaseEnabled !== false;
+            this.firebaseUser = userState && userState.isLoggedIn ? userState : null;
             
             if (modelSettings.success) {
                 const { config, storedKeys, availableLlm, availableStt, selectedModels } = modelSettings.data;
@@ -914,6 +917,7 @@ export class SettingsView extends LitElement {
     handleUsePicklesKey(e) {
         e.preventDefault()
         if (this.wasJustDragged) return
+        if (!this.firebaseEnabled) return
     
         console.log("Requesting Firebase authentication from main process...")
         window.api.settingsView.startFirebaseAuth();
@@ -965,11 +969,8 @@ export class SettingsView extends LitElement {
         
         this._userStateListener = (event, userState) => {
             console.log('[SettingsView] Received user-state-changed:', userState);
-            if (userState && userState.isLoggedIn) {
-                this.firebaseUser = userState;
-            } else {
-                this.firebaseUser = null;
-            }
+            this.firebaseEnabled = userState?.firebaseEnabled !== false;
+            this.firebaseUser = userState && userState.isLoggedIn ? userState : null;
             this.loadAutoUpdateSetting();
             // Reload model settings when user state changes (Firebase login/logout)
             this.loadInitialData();
@@ -1380,7 +1381,9 @@ export class SettingsView extends LitElement {
                     <div>
                         <h1 class="app-title">Pickle Glass</h1>
                         <div class="account-info">
-                            ${this.firebaseUser
+                            ${!this.firebaseEnabled
+                                ? 'Account: Local mode'
+                                : this.firebaseUser
                                 ? html`Account: ${this.firebaseUser.email || 'Logged In'}`
                                 : `Account: Not Logged In`
                             }
@@ -1465,7 +1468,7 @@ export class SettingsView extends LitElement {
                     </button>
                     
                     <div class="bottom-buttons">
-                        ${this.firebaseUser
+                        ${this.firebaseEnabled ? this.firebaseUser
                             ? html`
                                 <button class="settings-button half-width danger" @click=${this.handleFirebaseLogout}>
                                     <span>Logout</span>
@@ -1476,8 +1479,8 @@ export class SettingsView extends LitElement {
                                     <span>Login</span>
                                 </button>
                                 `
-                        }
-                        <button class="settings-button half-width danger" @click=${this.handleQuit}>
+                            : ''}
+                        <button class="settings-button ${this.firebaseEnabled ? 'half-width' : 'full-width'} danger" @click=${this.handleQuit}>
                             <span>Quit</span>
                         </button>
                     </div>

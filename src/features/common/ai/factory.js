@@ -69,10 +69,8 @@ const PROVIDERS = {
       name: 'OpenRouter',
       handler: () => require("./providers/openrouter"),
       llmModels: [
-          { id: 'deepseek/deepseek-v4-pro',           name: 'DeepSeek V4 Pro (via OR)' },
-          { id: 'deepseek/deepseek-v4-flash',         name: 'DeepSeek V4 Flash (via OR)' },
-          { id: 'qwen/qwen3.6-plus',                  name: 'Qwen3.6 Plus (via OR)' },
-          { id: 'moonshotai/kimi-k2.6',               name: 'Kimi K2.6 (via OR)' },
+          { id: 'qwen/qwen3.6-plus',    name: 'Qwen3.6 Plus (via OR)' },
+          { id: 'moonshotai/kimi-k2.6', name: 'Kimi K2.6 (via OR)' },
       ],
       sttModels: [],
   },

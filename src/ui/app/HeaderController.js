@@ -11,6 +11,7 @@ class HeaderTransitionManager {
         this.apiKeyHeader         = null;
         this.mainHeader            = null;
         this.permissionHeader      = null;
+        this.firebaseEnabled       = true;
 
         /**
          * only one header window is allowed
@@ -35,6 +36,7 @@ class HeaderTransitionManager {
                 this.welcomeHeader = document.createElement('welcome-header');
                 this.welcomeHeader.loginCallback = () => this.handleLoginOption();
                 this.welcomeHeader.apiKeyCallback = () => this.handleApiKeyOption();
+                this.welcomeHeader.showLoginOption = this.firebaseEnabled;
                 this.headerContainer.appendChild(this.welcomeHeader);
                 console.log('[HeaderController] ensureHeader: Header of type:', type, 'created.');
             } else if (type === 'apikey') {
@@ -127,6 +129,7 @@ class HeaderTransitionManager {
 
     //////// after_modelStateService ////////
     async handleStateUpdate(userState) {
+        this.firebaseEnabled = userState?.firebaseEnabled !== false;
         const isConfigured = await window.api.apiKeyHeader.areProvidersConfigured();
 
         if (isConfigured) {
@@ -137,6 +140,11 @@ class HeaderTransitionManager {
             } else {
                 this.transitionToPermissionHeader();
             }
+        } else if (userState?.isLoggedIn) {
+            // Already signed in to Firebase but no usable API keys yet — skip the welcome
+            // (which only offers Login vs API Key) and go straight to API key entry.
+            await this._resizeForApiKey();
+            this.ensureHeader('apikey');
         } else {
             // If no providers are configured, show the welcome header to prompt for setup.
             await this._resizeForWelcome();
@@ -147,6 +155,10 @@ class HeaderTransitionManager {
     // WelcomeHeader 콜백 메서드들
     async handleLoginOption() {
         console.log('[HeaderController] Login option selected');
+        if (!this.firebaseEnabled) {
+            await this.handleApiKeyOption();
+            return;
+        }
         if (window.api) {
             await window.api.common.startFirebaseAuth();
         }
@@ -247,8 +259,9 @@ class HeaderTransitionManager {
 
     async _resizeForWelcome() {
         if (!window.api) return;
-        console.log('[HeaderController] _resizeForWelcome: Resizing window to 456x370');
-        return window.api.headerController.resizeHeaderWindow({ width: 456, height: 364 })
+        const height = this.firebaseEnabled ? 364 : 292;
+        console.log(`[HeaderController] _resizeForWelcome: Resizing window to 456x${height}`);
+        return window.api.headerController.resizeHeaderWindow({ width: 456, height })
             .catch(() => {});
     }
 

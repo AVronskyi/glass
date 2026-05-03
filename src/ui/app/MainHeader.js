@@ -517,7 +517,6 @@ export class MainHeader extends LitElement {
     showSettingsWindow(element) {
         if (this.wasJustDragged) return;
         if (window.api) {
-            console.log(`[MainHeader] showSettingsWindow called at ${Date.now()}`);
             window.api.mainHeader.showSettingsWindow();
 
         }
@@ -526,7 +525,6 @@ export class MainHeader extends LitElement {
     hideSettingsWindow() {
         if (this.wasJustDragged) return;
         if (window.api) {
-            console.log(`[MainHeader] hideSettingsWindow called at ${Date.now()}`);
             window.api.mainHeader.hideSettingsWindow();
         }
     }

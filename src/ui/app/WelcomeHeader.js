@@ -163,12 +163,14 @@ export class WelcomeHeader extends LitElement {
     static properties = {
         loginCallback: { type: Function },
         apiKeyCallback: { type: Function },
+        showLoginOption: { type: Boolean },
     };
 
     constructor() {
         super();
         this.loginCallback = () => {};
         this.apiKeyCallback = () => {};
+        this.showLoginOption = true;
         this.handleClose = this.handleClose.bind(this);
     }
 
@@ -189,21 +191,25 @@ export class WelcomeHeader extends LitElement {
                 <button class="close-button" @click=${this.handleClose}>×</button>
                 <div class="header-section">
                     <div class="title">Welcome to Glass</div>
-                    <div class="subtitle">Choose how to connect your AI model</div>
+                    <div class="subtitle">${this.showLoginOption ? 'Choose how to connect your AI model' : 'Connect your local AI model setup'}</div>
                 </div>
-                <div class="option-card">
-                    <div class="divider"></div>
-                    <div class="option-content">
-                        <div class="option-title">Quick start with default API key</div>
-                        <div class="option-description">
-                            100% free with Pickle's OpenAI key<br/>No personal data collected<br/>Sign up with Google in seconds
+                ${this.showLoginOption
+                    ? html`
+                        <div class="option-card">
+                            <div class="divider"></div>
+                            <div class="option-content">
+                                <div class="option-title">Quick start with default API key</div>
+                                <div class="option-description">
+                                    100% free with Pickle's OpenAI key<br/>No personal data collected<br/>Sign up with Google in seconds
+                                </div>
+                            </div>
+                            <button class="action-button" @click=${this.loginCallback}>
+                                <div class="button-text">Open Browser to Log in</div>
+                                <div class="button-icon"><div class="arrow-icon"></div></div>
+                            </button>
                         </div>
-                    </div>
-                    <button class="action-button" @click=${this.loginCallback}>
-                        <div class="button-text">Open Browser to Log in</div>
-                        <div class="button-icon"><div class="arrow-icon"></div></div>
-                    </button>
-                </div>
+                    `
+                    : ''}
                 <div class="option-card">
                     <div class="divider"></div>
                     <div class="option-content">

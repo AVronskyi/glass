@@ -49,6 +49,8 @@ contextBridge.exposeInMainWorld('api', {
     downloadWhisperModel: (modelId) => ipcRenderer.invoke('whisper:download-model', modelId),
     validateKey: (data) => ipcRenderer.invoke('model:validate-key', data),
     setSelectedModel: (data) => ipcRenderer.invoke('model:set-selected-model', data),
+    getAllKeys: () => ipcRenderer.invoke('model:get-all-keys'),
+    getSelectedModels: () => ipcRenderer.invoke('model:get-selected-models'),
     areProvidersConfigured: () => ipcRenderer.invoke('model:are-providers-configured'),
     
     // Window Management
