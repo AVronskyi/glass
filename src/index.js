@@ -14,6 +14,7 @@ if (require('electron-squirrel-startup')) {
 const { app, BrowserWindow, shell, ipcMain, dialog, desktopCapturer, session } = require('electron');
 const { createWindows } = require('./window/windowManager.js');
 const listenService = require('./features/listen/listenService');
+const translateService = require('./features/translate/translateService');
 const { initializeFirebase } = require('./features/common/services/firebaseClient');
 const databaseInitializer = require('./features/common/services/databaseInitializer');
 const authService = require('./features/common/services/authService');
@@ -267,6 +268,7 @@ app.on('before-quit', async (event) => {
     try {
         // 1. Stop audio capture first (immediate)
         await listenService.closeSession();
+        await translateService.closeSession();
         console.log('[Shutdown] Audio capture stopped');
         
         // 2. End all active sessions (database operations) - with error handling

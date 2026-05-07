@@ -22,6 +22,8 @@ Useful targeted checks:
 - `node --check src/index.js` — syntax-check the main-process entrypoint.
 - `node --check src/features/common/services/authService.js` — syntax-check auth mode changes.
 - `node --check src/features/common/services/whisperService.js` — syntax-check local Whisper/STT changes.
+- `node --check src/features/common/ai/providers/whisper.js` — syntax-check the Whisper provider/chunk runner.
+- `node --check src/features/listen/stt/sttService.js` — syntax-check Listen STT session orchestration and Whisper debounce/filtering.
 - `node --check src/preload.js` — syntax-check preload bridge changes.
 
 Launch notes:
@@ -97,9 +99,39 @@ When wiring a new renderer→main capability, add the handler in `featureBridge.
 
 - `features/listen/` — real-time STT pipeline. `sttService` streams audio, `summaryService` periodically generates structured summaries from transcripts. Native AEC (echo cancellation) lives in `aec/` (Rust, separates mic vs. system loopback on Windows).
 - `features/ask/` — one-shot Q&A with screen-capture context. `askService` orchestrates screenshot + transcript + LLM call. Because screenshots are sent as `image_url` content, selected provider models must support image input or provide a deliberate text-only fallback.
+- `features/translate/` — live English→Ukrainian translation of system audio. See **Translate feature** below for details.
 - `features/settings/` — model/provider settings, presets. The active preset id is persisted on `users.selected_preset_id`; `settingsService.getSelectedPresetPrompt()` is the consumer-facing accessor that `askService` and `summaryService` call before each LLM request. In `promptBuilder.getSystemPrompt`, a non-empty `userPresetText` **replaces** the profile entirely — it is not layered on top. Default presets (school/sales/meetings/...) are seeded as full role descriptions ("You are a school assistant…") and rely on this replace behaviour, so don't downgrade preset injection back to a sub-section without rewriting the seed data.
 - `features/shortcuts/` — global keybinds; coordinates with windowManager via `internalBridge`.
 - `features/common/services/` — cross-cutting: `authService`, `modelStateService` (single source of truth for API keys + selected models, exposed as `global.modelStateService`), `ollamaService`, `whisperService`, `localAIManager`, `permissionService`, `encryptionService`, `migrationService`.
+
+### Translate feature
+
+`features/translate/translateService.js` is a singleton that owns its own `SttService` instance (separate from Listen's) configured for English-only system-audio capture. It wires Whisper Local (persistent server mode) → per-chunk LLM stream → `translate` content window.
+
+Key invariants:
+
+- **Hardcoded LLM provider/model.** Translate **does not** read `modelStateService.getCurrentModelInfo('llm')`. It is fixed to `provider='openrouter'`, `model='google/gemini-2.5-flash-lite'` (constants `TRANSLATE_LLM_PROVIDER` / `TRANSLATE_LLM_MODEL` in `translateService.js`). Settings-side LLM choice affects Listen/Ask but not Translate. Translate fetches just the API key via `modelStateService.getAllApiKeys().openrouter`. If absent, the renderer status bar shows `No OpenRouter key. Open Settings → API Keys → OpenRouter.` instead of a generic failure.
+- **Hardcoded STT provider/model.** Translate **does not** read `modelStateService.getCurrentModelInfo('stt')`. Its `SttService` is constructed with `modelInfoOverride: { provider: 'whisper', model: process.env.PICKLE_TRANSLATE_WHISPER_MODEL || 'whisper-base', apiKey: 'local' }`, so changing the Settings-side STT picker affects Listen but not Translate.
+- **Whisper server-mode is required.** TranslateService initializes its `SttService` with `providerOptions: { whisperMode: 'server', whisperLanguage: 'en' }`. The persistent `whisper-server.exe` binary must be present; `whisper-cli.exe` alone is not enough. `whisperService.getWhisperServerPath()` checks `PICKLE_WHISPER_SERVER_BIN`, local managed dirs, PATH, then provisions via Homebrew/autoInstall and checks local/PATH again before failing.
+- **Mutual exclusivity with Listen.** Both feature names appear in `SIDE_FEATURE_WINDOW_NAMES = ['listen', 'translate']` in `windowManager.js`. Showing one auto-hides the other. `translateService.stopListenForModeSwitch()` and `listenService.handleListenRequest('Listen')` (which calls `translateService.stopForModeSwitch()`) keep the underlying STT sessions in sync.
+- **Active-segment streaming model.** TranslateService keeps a single `activeSegment` per utterance (one card on screen). Each Whisper chunk fires `onPartialTranscript` (added to sttService for this feature, fires alongside the existing `Them` partial-update path) → `handlePartial(text)` updates `segment.sourceText`. A new LLM stream is kicked off **only if no stream is in flight** (`streamInFlight` flag). Only the current `segment.abortController` owner may clear `streamInFlight` or re-kick after `finally`; stale aborted streams must return without touching the active pass.
+- **Stabilization, prefix-gated.** While a stream is producing tokens, `processTranslationStream.emit()` holds the previous translation on screen until the new stream's text catches up in length — prevents the card from "shrinking" mid-render. The snapshot is **only** valid if the new source extends the previous one (`newSrc.startsWith(oldSrc)`); when the source shrinks (e.g. a hard-cap flush hands `handleFinal(front)` to translate just the front portion), the snapshot is reset to `''`. Don't drop this prefix check or the card will visibly cut off whenever a hard-cap split happens.
+- **Hard-cap on buffer length.** sttService accepts `maxCompletionBufferChars` (TranslateService passes 250). When `theirCompletionBuffer` exceeds this, sttService flushes early at the last sentence-boundary (`.`/`?`/`!` followed by a space) past the halfway point so a long monologue (no natural pauses) gets split into 2-3 cards instead of one giant card that exceeds `maxTokens`. The flushed "front" segment is marked `isFinalizing`; while that final LLM pass is running, the remaining "back" partial must create a fresh segment/card instead of overwriting the old one.
+- **Close flushes pending buffer.** `sttService.closeSessions()` now calls and awaits `flushMyCompletion()` / `flushTheirCompletion()` before clearing buffers. The flush methods clear their buffers synchronously, send the final UI update, then return a caught Promise for `onTranscriptionComplete`, so Listen does not end the DB session before the trailing transcript save resolves. `translateService.closeSession()` runs `sttService.closeSessions()` first, waits up to 5 s for any final LLM stream to complete, then aborts `sessionAbortController`.
+- **Rolling LLM context.** `translateService.recentTurns` keeps the last `CONTEXT_TURNS` (default 2) finalized {EN, UK} pairs and prepends them as a separate system message labeled "Recent conversation context (already translated, do NOT re-translate, only use to disambiguate the new input)". Helps with short orphan fragments like "Yes, exactly".
+- **Translate audio routing.** `src/ui/listen/audioCore/listenCapture.js` reads the `?view=translate` URL param and routes system audio through `window.api.translateCapture` (preload.js exposes both `listenCapture` and `translateCapture`). Mic capture is skipped (`shouldCaptureMic = false`) — Translate listens to "Them" only.
+
+Tunable env vars (all optional, defaults are sensible):
+
+- `PICKLE_TRANSLATE_DEBOUNCE_MS` — debounce before final flush (default `2000`).
+- `PICKLE_TRANSLATE_WHISPER_CHUNK_SECONDS` — minimum audio per Whisper chunk (default `1.0`).
+- `PICKLE_TRANSLATE_WHISPER_INTERVAL_MS` — Whisper processing-loop poll interval (default `250`).
+- `PICKLE_TRANSLATE_TEMPERATURE` — LLM temperature (default `0.1`).
+- `PICKLE_TRANSLATE_MAX_TOKENS` — LLM max output (default `1024`).
+- `PICKLE_TRANSLATE_SEGMENT_GAP_MS` — gap that triggers new segment (default `4000`).
+- `PICKLE_TRANSLATE_MIN_PARTIAL_CHARS` — min chars to consider a partial (default `4`).
+- `PICKLE_TRANSLATE_CONTEXT_TURNS` — recent-turns context size (default `2`, set `0` to disable).
+- `PICKLE_TRANSLATE_MAX_BUFFER_CHARS` — hard-cap before forced sentence-boundary flush (default `250`).
 
 ### Local Whisper STT
 
@@ -110,6 +142,22 @@ Whisper Local is the preferred no-cloud STT path for Windows development. `whisp
 - Otherwise it falls back to `%USERPROFILE%\.glass\whisper`.
 
 Models live under `<base>\models`, temp audio under `<base>\temp`, and executables are searched in both `<base>` and `<base>\bin` before auto-installing. The setup UI defaults Whisper STT to `whisper-base` for the best initial quality/speed balance.
+
+Executable discovery is deliberately stricter than a file-exists check. Newer `whisper.cpp` releases can leave deprecated shim binaries such as `whisper-whisper.exe`; those print a deprecation warning and exit instead of transcribing. `whisperService` probes candidates with `--help`, rejects deprecated shims, and should settle on `whisper-cli.exe`. If only a stale shim exists in `F:\programs\Whisper\bin`, initialization should auto-install the Windows release archive and copy the full bin folder so `whisper-cli.exe` and its DLLs are present.
+
+Persistent server discovery uses the same strict probe. `getWhisperServerPath()` checks `PICKLE_WHISPER_SERVER_BIN`, local managed paths, and PATH (`whisper-server` / `whisper-server.exe`), then provisions the local whisper.cpp bundle and repeats discovery before throwing. This matters for Translate because a usable `whisper-cli` from PATH is not enough.
+
+Runtime tuning is env-driven:
+- `PICKLE_WHISPER_LANGUAGE` — passed to `--language`; default `auto`. Use `en`, `uk`, `ru`, etc. when the expected language is known.
+- `PICKLE_WHISPER_THREADS` — passed to `--threads`; default `4`.
+- `PICKLE_WHISPER_CHUNK_SECONDS` — minimum PCM buffer duration before spawning `whisper-cli`; default `4`.
+- `PICKLE_WHISPER_INTERVAL_MS` — polling interval for chunk processing; default `1000`.
+- `PICKLE_WHISPER_SILENCE_RMS` — skip near-silent PCM chunks below this RMS; default `80`, set `0` to disable.
+- `PICKLE_WHISPER_DEBUG` — set `1`/`true` to log successful Whisper stderr/stdout details; otherwise only non-zero exits are noisy.
+
+The current provider launches `whisper-cli` once per chunk, so model load time is the main latency cost. It uses `--no-timestamps`, `--no-prints`, and `--suppress-nst` to keep output focused on transcript text and reduce non-speech tokens. A future low-latency rewrite should use a persistent/streaming Whisper process instead of repeatedly launching the CLI.
+
+For Listen UI, Whisper chunks are handled differently from streaming cloud STT: `sttService.handleWhisperMessage()` sends partial previews and lets the existing debounce flush produce the final message and DB transcript. Do not send a Whisper chunk as `isFinal: true` immediately and then let debounce flush it again, or the transcript panel will show duplicate bubbles. Noise strings such as `[no speech detected]`, `[MUSIC PLAYING]`, and keyboard-clicking captions are filtered before they reach the UI/history.
 
 ### Startup sequence (`src/index.js`)
 

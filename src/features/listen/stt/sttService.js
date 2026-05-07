@@ -4,6 +4,7 @@ const { createSTT } = require('../../common/ai/factory');
 const modelStateService = require('../../common/services/modelStateService');
 
 const COMPLETION_DEBOUNCE_MS = 2000;
+const WHISPER_DUPLICATE_WINDOW_MS = 10 * 1000;
 
 // ── New heartbeat / renewal constants ────────────────────────────────────────────
 // Interval to send low-cost keep-alive messages so the remote service does not
@@ -21,7 +22,18 @@ const SESSION_RENEW_INTERVAL_MS = 20 * 60 * 1000; // 20 minutes
 const SOCKET_OVERLAP_MS = 2 * 1000; // 2 seconds
 
 class SttService {
-    constructor() {
+    constructor(options = {}) {
+        this.rendererWindowName = options.rendererWindowName || 'listen';
+        this.updateChannel = options.updateChannel || 'stt-update';
+        this.systemAudioChannel = options.systemAudioChannel || 'system-audio-data';
+        this.completionDebounceMs = options.completionDebounceMs || COMPLETION_DEBOUNCE_MS;
+        this.maxCompletionBufferChars = Math.max(0, options.maxCompletionBufferChars || 0);
+        this.readyStatusText = options.readyStatusText || 'Listening...';
+        this.respectLanguageEnv = options.respectLanguageEnv !== false;
+        this.enabledSpeakers = new Set(options.enabledSpeakers || ['Me', 'Them']);
+        this.providerOptions = options.providerOptions || {};
+        this.modelInfoOverride = options.modelInfoOverride || null;
+
         this.mySttSession = null;
         this.theirSttSession = null;
         this.myCurrentUtterance = '';
@@ -43,29 +55,73 @@ class SttService {
         // Callbacks
         this.onTranscriptionComplete = null;
         this.onStatusUpdate = null;
+        this.onPartialTranscript = null;
 
         this.modelInfo = null; 
+        this.lastWhisperTranscriptBySpeaker = new Map();
     }
 
-    setCallbacks({ onTranscriptionComplete, onStatusUpdate }) {
+    isSpeakerEnabled(speaker) {
+        return this.enabledSpeakers.has(speaker);
+    }
+
+    setCallbacks({ onTranscriptionComplete, onStatusUpdate, onPartialTranscript }) {
         this.onTranscriptionComplete = onTranscriptionComplete;
         this.onStatusUpdate = onStatusUpdate;
+        this.onPartialTranscript = onPartialTranscript;
+    }
+
+    async resolveModelInfoOverride() {
+        if (!this.modelInfoOverride) return null;
+        return typeof this.modelInfoOverride === 'function'
+            ? await this.modelInfoOverride()
+            : this.modelInfoOverride;
+    }
+
+    notifyTranscriptionComplete(speaker, text) {
+        if (!this.onTranscriptionComplete) return Promise.resolve();
+
+        try {
+            return Promise.resolve(this.onTranscriptionComplete(speaker, text)).catch(error => {
+                console.error(`[SttService] onTranscriptionComplete callback failed for ${speaker}:`, error);
+            });
+        } catch (error) {
+            console.error(`[SttService] onTranscriptionComplete callback failed for ${speaker}:`, error);
+            return Promise.resolve();
+        }
+    }
+
+    emitPartialTranscript(speaker, text) {
+        if (!this.onPartialTranscript) return;
+        if (!this.isSpeakerEnabled(speaker)) return;
+        const trimmed = String(text || '').trim();
+        if (!trimmed) return;
+        try {
+            this.onPartialTranscript(speaker, trimmed);
+        } catch (err) {
+            console.error('[SttService] onPartialTranscript callback failed:', err);
+        }
     }
 
     sendToRenderer(channel, data) {
-        // Listen 관련 이벤트는 Listen 윈도우에만 전송 (Ask 윈도우 충돌 방지)
+        // Feature-specific events are sent only to the owning content window.
         const { windowPool } = require('../../../window/windowManager');
-        const listenWindow = windowPool?.get('listen');
+        const targetWindow = windowPool?.get(this.rendererWindowName);
         
-        if (listenWindow && !listenWindow.isDestroyed()) {
-            listenWindow.webContents.send(channel, data);
+        if (targetWindow && !targetWindow.isDestroyed()) {
+            targetWindow.webContents.send(channel, data);
         }
+    }
+
+    sendTranscriptUpdate(payload) {
+        if (!this.isSpeakerEnabled(payload.speaker)) return;
+        this.sendToRenderer(this.updateChannel, payload);
     }
 
     async handleSendSystemAudioContent(data, mimeType) {
         try {
             await this.sendSystemAudioContent(data, mimeType);
-            this.sendToRenderer('system-audio-data', { data });
+            this.sendToRenderer(this.systemAudioChannel, { data });
             return { success: true };
         } catch (error) {
             console.error('Error sending system audio:', error);
@@ -75,56 +131,54 @@ class SttService {
 
     flushMyCompletion() {
         const finalText = (this.myCompletionBuffer + this.myCurrentUtterance).trim();
-        if (!this.modelInfo || !finalText) return;
+        if (!this.modelInfo || !finalText) return Promise.resolve();
+        if (!this.isSpeakerEnabled('Me')) return Promise.resolve();
 
-        // Notify completion callback
-        if (this.onTranscriptionComplete) {
-            this.onTranscriptionComplete('Me', finalText);
-        }
-        
+        if (this.myCompletionTimer) clearTimeout(this.myCompletionTimer);
+        this.myCompletionBuffer = '';
+        this.myCompletionTimer = null;
+        this.myCurrentUtterance = '';
+
         // Send to renderer as final
-        this.sendToRenderer('stt-update', {
+        this.sendTranscriptUpdate({
             speaker: 'Me',
             text: finalText,
             isPartial: false,
             isFinal: true,
             timestamp: Date.now(),
         });
-
-        this.myCompletionBuffer = '';
-        this.myCompletionTimer = null;
-        this.myCurrentUtterance = '';
         
         if (this.onStatusUpdate) {
-            this.onStatusUpdate('Listening...');
+            this.onStatusUpdate(this.readyStatusText);
         }
+
+        return this.notifyTranscriptionComplete('Me', finalText);
     }
 
     flushTheirCompletion() {
         const finalText = (this.theirCompletionBuffer + this.theirCurrentUtterance).trim();
-        if (!this.modelInfo || !finalText) return;
-        
-        // Notify completion callback
-        if (this.onTranscriptionComplete) {
-            this.onTranscriptionComplete('Them', finalText);
-        }
-        
+        if (!this.modelInfo || !finalText) return Promise.resolve();
+        if (!this.isSpeakerEnabled('Them')) return Promise.resolve();
+
+        if (this.theirCompletionTimer) clearTimeout(this.theirCompletionTimer);
+        this.theirCompletionBuffer = '';
+        this.theirCompletionTimer = null;
+        this.theirCurrentUtterance = '';
+
         // Send to renderer as final
-        this.sendToRenderer('stt-update', {
+        this.sendTranscriptUpdate({
             speaker: 'Them',
             text: finalText,
             isPartial: false,
             isFinal: true,
             timestamp: Date.now(),
         });
-
-        this.theirCompletionBuffer = '';
-        this.theirCompletionTimer = null;
-        this.theirCurrentUtterance = '';
         
         if (this.onStatusUpdate) {
-            this.onStatusUpdate('Listening...');
+            this.onStatusUpdate(this.readyStatusText);
         }
+
+        return this.notifyTranscriptionComplete('Them', finalText);
     }
 
     debounceMyCompletion(text) {
@@ -135,7 +189,7 @@ class SttService {
         }
 
         if (this.myCompletionTimer) clearTimeout(this.myCompletionTimer);
-        this.myCompletionTimer = setTimeout(() => this.flushMyCompletion(), COMPLETION_DEBOUNCE_MS);
+        this.myCompletionTimer = setTimeout(() => this.flushMyCompletion(), this.completionDebounceMs);
     }
 
     debounceTheirCompletion(text) {
@@ -146,13 +200,104 @@ class SttService {
         }
 
         if (this.theirCompletionTimer) clearTimeout(this.theirCompletionTimer);
-        this.theirCompletionTimer = setTimeout(() => this.flushTheirCompletion(), COMPLETION_DEBOUNCE_MS);
+        this.theirCompletionTimer = null;
+
+        // Hard cap: prevent unbounded growth during long monologues without pauses.
+        // When the buffer exceeds maxCompletionBufferChars, flush at the last
+        // sentence boundary if any (so we don't split mid-word) — otherwise flush all.
+        if (this.maxCompletionBufferChars > 0
+            && this.theirCompletionBuffer.length > this.maxCompletionBufferChars) {
+            const buf = this.theirCompletionBuffer;
+            const breakIdx = Math.max(
+                buf.lastIndexOf('. '),
+                buf.lastIndexOf('? '),
+                buf.lastIndexOf('! ')
+            );
+            if (breakIdx > this.maxCompletionBufferChars / 2) {
+                const front = buf.slice(0, breakIdx + 1);
+                const back  = buf.slice(breakIdx + 2);
+                this.theirCompletionBuffer = front;
+                this.flushTheirCompletion();
+                this.theirCompletionBuffer = back;
+                if (back) {
+                    this.theirCompletionTimer = setTimeout(
+                        () => this.flushTheirCompletion(),
+                        this.completionDebounceMs
+                    );
+                }
+            } else {
+                this.flushTheirCompletion();
+            }
+            return;
+        }
+
+        this.theirCompletionTimer = setTimeout(() => this.flushTheirCompletion(), this.completionDebounceMs);
+    }
+
+    normalizeWhisperText(text) {
+        return String(text || '').replace(/\s+/g, ' ').trim().toLowerCase();
+    }
+
+    isWhisperNoiseText(text) {
+        const normalized = this.normalizeWhisperText(text);
+        if (!normalized) return true;
+
+        return /^(\[(blank_audio|no speech detected|inaudible|music( playing)?|sound|noise|silence)\]\s*)+$/.test(normalized)
+            || /^(\((blank_audio|no speech detected|inaudible|music( playing)?|sound|noise|silence|keyboard clicking|keyboard clacking)\)\s*)+$/.test(normalized);
+    }
+
+    isRecentWhisperDuplicate(speaker, text) {
+        const normalized = this.normalizeWhisperText(text);
+        const previous = this.lastWhisperTranscriptBySpeaker.get(speaker);
+        const now = Date.now();
+
+        if (previous && previous.text === normalized && now - previous.timestamp < WHISPER_DUPLICATE_WINDOW_MS) {
+            return true;
+        }
+
+        this.lastWhisperTranscriptBySpeaker.set(speaker, { text: normalized, timestamp: now });
+        return false;
+    }
+
+    handleWhisperMessage(speaker, message) {
+        if (!this.isSpeakerEnabled(speaker)) return;
+        if (!message.text || !message.text.trim()) return;
+
+        const finalText = message.text.trim();
+        if (this.isWhisperNoiseText(finalText) || finalText.length <= 2) {
+            console.log(`[Whisper-${speaker}] Filtered noise: "${finalText}"`);
+            return;
+        }
+
+        if (this.isRecentWhisperDuplicate(speaker, finalText)) {
+            console.log(`[Whisper-${speaker}] Filtered duplicate: "${finalText}"`);
+            return;
+        }
+
+        if (speaker === 'Me') {
+            this.debounceMyCompletion(finalText);
+        } else {
+            this.debounceTheirCompletion(finalText);
+        }
+
+        const previewText = speaker === 'Me' ? this.myCompletionBuffer : this.theirCompletionBuffer;
+        this.sendTranscriptUpdate({
+            speaker,
+            text: previewText,
+            isPartial: true,
+            isFinal: false,
+            timestamp: Date.now(),
+        });
+        this.emitPartialTranscript(speaker, previewText);
     }
 
     async initializeSttSessions(language = 'en') {
-        const effectiveLanguage = process.env.OPENAI_TRANSCRIBE_LANG || language || 'en';
+        const effectiveLanguage = this.respectLanguageEnv
+            ? process.env.OPENAI_TRANSCRIBE_LANG || language || 'en'
+            : language || 'en';
 
-        const modelInfo = await modelStateService.getCurrentModelInfo('stt');
+        const modelInfoOverride = await this.resolveModelInfoOverride();
+        const modelInfo = modelInfoOverride || await modelStateService.getCurrentModelInfo('stt');
         if (!modelInfo || !modelInfo.apiKey) {
             throw new Error('AI model or API key is not configured.');
         }
@@ -167,43 +312,7 @@ class SttService {
             // console.log('[SttService] handleMyMessage', message);
             
             if (this.modelInfo.provider === 'whisper') {
-                // Whisper STT emits 'transcription' events with different structure
-                if (message.text && message.text.trim()) {
-                    const finalText = message.text.trim();
-                    
-                    // Filter out Whisper noise transcriptions
-                    const noisePatterns = [
-                        '[BLANK_AUDIO]',
-                        '[INAUDIBLE]',
-                        '[MUSIC]',
-                        '[SOUND]',
-                        '[NOISE]',
-                        '(BLANK_AUDIO)',
-                        '(INAUDIBLE)',
-                        '(MUSIC)',
-                        '(SOUND)',
-                        '(NOISE)'
-                    ];
-                    
-                    const isNoise = noisePatterns.some(pattern => 
-                        finalText.includes(pattern) || finalText === pattern
-                    );
-                    
-                    
-                    if (!isNoise && finalText.length > 2) {
-                        this.debounceMyCompletion(finalText);
-                        
-                        this.sendToRenderer('stt-update', {
-                            speaker: 'Me',
-                            text: finalText,
-                            isPartial: false,
-                            isFinal: true,
-                            timestamp: Date.now(),
-                        });
-                    } else {
-                        console.log(`[Whisper-Me] Filtered noise: "${finalText}"`);
-                    }
-                }
+                this.handleWhisperMessage('Me', message);
                 return;
             } else if (this.modelInfo.provider === 'gemini') {
                 if (!message.serverContent?.modelTurn) {
@@ -228,7 +337,7 @@ class SttService {
             
                 this.debounceMyCompletion(textChunk);
                 
-                this.sendToRenderer('stt-update', {
+                this.sendTranscriptUpdate({
                     speaker: 'Me',
                     text: this.myCompletionBuffer,
                     isPartial: true,
@@ -258,7 +367,7 @@ class SttService {
                     
                     const continuousText = (this.myCompletionBuffer + ' ' + this.myCurrentUtterance).trim();
 
-                    this.sendToRenderer('stt-update', {
+                    this.sendTranscriptUpdate({
                         speaker: 'Me',
                         text: continuousText,
                         isPartial: true,
@@ -277,7 +386,7 @@ class SttService {
                     this.myCurrentUtterance += text;
                     const continuousText = this.myCompletionBuffer + (this.myCompletionBuffer ? ' ' : '') + this.myCurrentUtterance;
                     if (text && !text.includes('vq_lbr_audio_')) {
-                        this.sendToRenderer('stt-update', {
+                        this.sendTranscriptUpdate({
                             speaker: 'Me',
                             text: continuousText,
                             isPartial: true,
@@ -308,44 +417,7 @@ class SttService {
             }
             
             if (this.modelInfo.provider === 'whisper') {
-                // Whisper STT emits 'transcription' events with different structure
-                if (message.text && message.text.trim()) {
-                    const finalText = message.text.trim();
-                    
-                    // Filter out Whisper noise transcriptions
-                    const noisePatterns = [
-                        '[BLANK_AUDIO]',
-                        '[INAUDIBLE]',
-                        '[MUSIC]',
-                        '[SOUND]',
-                        '[NOISE]',
-                        '(BLANK_AUDIO)',
-                        '(INAUDIBLE)',
-                        '(MUSIC)',
-                        '(SOUND)',
-                        '(NOISE)'
-                    ];
-                    
-                    const isNoise = noisePatterns.some(pattern => 
-                        finalText.includes(pattern) || finalText === pattern
-                    );
-                    
-                    
-                    // Only process if it's not noise, not a false positive, and has meaningful content
-                    if (!isNoise && finalText.length > 2) {
-                        this.debounceTheirCompletion(finalText);
-                        
-                        this.sendToRenderer('stt-update', {
-                            speaker: 'Them',
-                            text: finalText,
-                            isPartial: false,
-                            isFinal: true,
-                            timestamp: Date.now(),
-                        });
-                    } else {
-                        console.log(`[Whisper-Them] Filtered noise: "${finalText}"`);
-                    }
-                }
+                this.handleWhisperMessage('Them', message);
                 return;
             } else if (this.modelInfo.provider === 'gemini') {
                 if (!message.serverContent?.modelTurn) {
@@ -369,14 +441,15 @@ class SttService {
                 }
 
                 this.debounceTheirCompletion(textChunk);
-                
-                this.sendToRenderer('stt-update', {
+
+                this.sendTranscriptUpdate({
                     speaker: 'Them',
                     text: this.theirCompletionBuffer,
                     isPartial: true,
                     isFinal: false,
                     timestamp: Date.now(),
                 });
+                this.emitPartialTranscript('Them', this.theirCompletionBuffer);
 
             // Deepgram
             } else if (this.modelInfo.provider === 'deepgram') {
@@ -393,16 +466,17 @@ class SttService {
                     this.theirCompletionTimer = null;
 
                     this.theirCurrentUtterance = text;
-                    
+
                     const continuousText = (this.theirCompletionBuffer + ' ' + this.theirCurrentUtterance).trim();
 
-                    this.sendToRenderer('stt-update', {
+                    this.sendTranscriptUpdate({
                         speaker: 'Them',
                         text: continuousText,
                         isPartial: true,
                         isFinal: false,
                         timestamp: Date.now(),
                     });
+                    this.emitPartialTranscript('Them', continuousText);
                 }
 
             } else {
@@ -414,13 +488,14 @@ class SttService {
                     this.theirCurrentUtterance += text;
                     const continuousText = this.theirCompletionBuffer + (this.theirCompletionBuffer ? ' ' : '') + this.theirCurrentUtterance;
                     if (text && !text.includes('vq_lbr_audio_')) {
-                        this.sendToRenderer('stt-update', {
+                        this.sendTranscriptUpdate({
                             speaker: 'Them',
                             text: continuousText,
                             isPartial: true,
                             isFinal: false,
                             timestamp: Date.now(),
                         });
+                        this.emitPartialTranscript('Them', continuousText);
                     }
                 } else if (type === 'conversation.item.input_audio_transcription.completed') {
                     if (text && text.trim()) {
@@ -455,7 +530,9 @@ class SttService {
         };
         
         const sttOptions = {
+            ...this.providerOptions,
             apiKey: this.modelInfo.apiKey,
+            model: this.modelInfo.model,
             language: effectiveLanguage,
             usePortkey: this.modelInfo.provider === 'openai-glass',
             portkeyVirtualKey: this.modelInfo.provider === 'openai-glass' ? this.modelInfo.apiKey : undefined,
@@ -465,12 +542,33 @@ class SttService {
         const myOptions = { ...sttOptions, callbacks: mySttConfig.callbacks, sessionType: 'my' };
         const theirOptions = { ...sttOptions, callbacks: theirSttConfig.callbacks, sessionType: 'their' };
 
-        [this.mySttSession, this.theirSttSession] = await Promise.all([
-            createSTT(this.modelInfo.provider, myOptions),
-            createSTT(this.modelInfo.provider, theirOptions),
-        ]);
+        const sessionInitializers = [];
+        this.mySttSession = null;
+        this.theirSttSession = null;
 
-        console.log('✅ Both STT sessions initialized successfully.');
+        if (this.isSpeakerEnabled('Me')) {
+            sessionInitializers.push(
+                createSTT(this.modelInfo.provider, myOptions).then(session => {
+                    this.mySttSession = session;
+                })
+            );
+        }
+
+        if (this.isSpeakerEnabled('Them')) {
+            sessionInitializers.push(
+                createSTT(this.modelInfo.provider, theirOptions).then(session => {
+                    this.theirSttSession = session;
+                })
+            );
+        }
+
+        if (sessionInitializers.length === 0) {
+            throw new Error('At least one STT speaker must be enabled.');
+        }
+
+        await Promise.all(sessionInitializers);
+
+        console.log(`✅ STT sessions initialized successfully for: ${Array.from(this.enabledSpeakers).join(', ')}.`);
 
         // ── Setup keep-alive heart-beats ────────────────────────────────────────
         if (this.keepAliveInterval) clearInterval(this.keepAliveInterval);
@@ -547,6 +645,9 @@ class SttService {
         // const provider = await this.getAiProvider();
         // const isGemini = provider === 'gemini';
         
+        if (!this.isSpeakerEnabled('Me')) {
+            throw new Error('User STT session is disabled');
+        }
         if (!this.mySttSession) {
             throw new Error('User STT session not active');
         }
@@ -681,7 +782,7 @@ class SttService {
                 const monoChunk = CHANNELS === 2 ? this.convertStereoToMono(chunk) : chunk;
                 const base64Data = monoChunk.toString('base64');
 
-                this.sendToRenderer('system-audio-data', { data: base64Data });
+                this.sendToRenderer(this.systemAudioChannel, { data: base64Data });
 
                 if (this.theirSttSession) {
                     try {
@@ -739,8 +840,14 @@ class SttService {
         }
     }
 
+    isMacOSAudioRunning() {
+        return !!this.systemAudioProc;
+    }
+
     isSessionActive() {
-        return !!this.mySttSession && !!this.theirSttSession;
+        const needsMySession = this.isSpeakerEnabled('Me');
+        const needsTheirSession = this.isSpeakerEnabled('Them');
+        return (!needsMySession || !!this.mySttSession) && (!needsTheirSession || !!this.theirSttSession);
     }
 
     async closeSessions() {
@@ -766,6 +873,18 @@ class SttService {
             this.theirCompletionTimer = null;
         }
 
+        // Flush any pending buffers so the last spoken words still get a final
+        // transcription event (otherwise pressing Stop right after speaking
+        // would drop ~1-2 sentences that were waiting for the debounce timer).
+        const flushPromises = [];
+        if (this.myCompletionBuffer || this.myCurrentUtterance) {
+            flushPromises.push(this.flushMyCompletion());
+        }
+        if (this.theirCompletionBuffer || this.theirCurrentUtterance) {
+            flushPromises.push(this.flushTheirCompletion());
+        }
+        await Promise.all(flushPromises);
+
         const closePromises = [];
         if (this.mySttSession) {
             closePromises.push(this.mySttSession.close());
@@ -784,8 +903,9 @@ class SttService {
         this.theirCurrentUtterance = '';
         this.myCompletionBuffer = '';
         this.theirCompletionBuffer = '';
+        this.lastWhisperTranscriptBySpeaker.clear();
         this.modelInfo = null; 
     }
 }
 
-module.exports = SttService; 
+module.exports = SttService;

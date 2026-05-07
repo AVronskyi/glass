@@ -36,23 +36,29 @@ const windowPool = new Map();
 
 let settingsHideTimer = null;
 
+const FEATURE_WINDOW_NAMES = ['listen', 'translate', 'ask'];
+const SIDE_FEATURE_WINDOW_NAMES = ['listen', 'translate'];
 
 let layoutManager = null;
 let movementManager = null;
 
+function collectVisibleFeatureWindows(windowPool) {
+    const visibleWindows = {};
+
+    for (const name of FEATURE_WINDOW_NAMES) {
+        const win = windowPool.get(name);
+        if (win && !win.isDestroyed() && win.isVisible()) {
+            visibleWindows[name] = true;
+        }
+    }
+
+    return visibleWindows;
+}
 
 function updateChildWindowLayouts(animated = true) {
     // if (movementManager.isAnimating) return;
 
-    const visibleWindows = {};
-    const listenWin = windowPool.get('listen');
-    const askWin = windowPool.get('ask');
-    if (listenWin && !listenWin.isDestroyed() && listenWin.isVisible()) {
-        visibleWindows.listen = true;
-    }
-    if (askWin && !askWin.isDestroyed() && askWin.isVisible()) {
-        visibleWindows.ask = true;
-    }
+    const visibleWindows = collectVisibleFeatureWindows(windowPool);
 
     if (Object.keys(visibleWindows).length === 0) return;
 
@@ -137,15 +143,7 @@ function setupWindowController(windowPool, layoutManager, movementManager) {
             if (!newHeaderPosition) return;
     
             const futureHeaderBounds = { ...header.getBounds(), ...newHeaderPosition };
-            const visibleWindows = {};
-            const listenWin = windowPool.get('listen');
-            const askWin = windowPool.get('ask');
-            if (listenWin && !listenWin.isDestroyed() && listenWin.isVisible()) {
-                visibleWindows.listen = true;
-            }
-            if (askWin && !askWin.isDestroyed() && askWin.isVisible()) {
-                visibleWindows.ask = true;
-            }
+            const visibleWindows = collectVisibleFeatureWindows(windowPool);
 
             const newChildLayout = layoutManager.calculateFeatureWindowLayout(visibleWindows, futureHeaderBounds);
     
@@ -253,7 +251,7 @@ function changeAllWindowsVisibility(windowPool, targetVisibility) {
  * @param {Map<string, BrowserWindow>} windowPool
  * @param {WindowLayoutManager} layoutManager 
  * @param {SmoothMovementManager} movementManager
- * @param {'listen' | 'ask' | 'settings' | 'shortcut-settings'} name 
+ * @param {'listen' | 'translate' | 'ask' | 'settings' | 'shortcut-settings'} name 
  * @param {boolean} shouldBeVisible 
  */
 async function handleWindowVisibilityRequest(windowPool, layoutManager, movementManager, name, shouldBeVisible) {
@@ -348,19 +346,27 @@ async function handleWindowVisibilityRequest(windowPool, layoutManager, movement
         return;
     }
 
-    if (name === 'listen' || name === 'ask') {
+    if (FEATURE_WINDOW_NAMES.includes(name)) {
         const win = windowPool.get(name);
-        const otherName = name === 'listen' ? 'ask' : 'listen';
-        const otherWin = windowPool.get(otherName);
-        const isOtherWinVisible = otherWin && !otherWin.isDestroyed() && otherWin.isVisible();
         
         const ANIM_OFFSET_X = 50;
         const ANIM_OFFSET_Y = 20;
 
-        const finalVisibility = {
-            listen: (name === 'listen' && shouldBeVisible) || (otherName === 'listen' && isOtherWinVisible),
-            ask: (name === 'ask' && shouldBeVisible) || (otherName === 'ask' && isOtherWinVisible),
-        };
+        const finalVisibility = collectVisibleFeatureWindows(windowPool);
+        finalVisibility[name] = shouldBeVisible;
+
+        if (shouldBeVisible && SIDE_FEATURE_WINDOW_NAMES.includes(name)) {
+            for (const sideName of SIDE_FEATURE_WINDOW_NAMES) {
+                if (sideName !== name) {
+                    finalVisibility[sideName] = false;
+                    const excludedWin = windowPool.get(sideName);
+                    if (excludedWin && !excludedWin.isDestroyed() && excludedWin.isVisible()) {
+                        excludedWin.hide();
+                    }
+                }
+            }
+        }
+
         if (!shouldBeVisible) {
             finalVisibility[name] = false;
         }
@@ -373,8 +379,8 @@ async function handleWindowVisibilityRequest(windowPool, layoutManager, movement
             if (!targetBounds) return;
 
             const startPos = { ...targetBounds };
-            if (name === 'listen') startPos.x -= ANIM_OFFSET_X;
-            else if (name === 'ask') startPos.y -= ANIM_OFFSET_Y;
+            if (name === 'ask') startPos.y -= ANIM_OFFSET_Y;
+            else startPos.x -= ANIM_OFFSET_X;
 
             win.setOpacity(0);
             win.setBounds(startPos);
@@ -388,8 +394,8 @@ async function handleWindowVisibilityRequest(windowPool, layoutManager, movement
 
             const currentBounds = win.getBounds();
             const targetPos = { ...currentBounds };
-            if (name === 'listen') targetPos.x -= ANIM_OFFSET_X;
-            else if (name === 'ask') targetPos.y -= ANIM_OFFSET_Y;
+            if (name === 'ask') targetPos.y -= ANIM_OFFSET_Y;
+            else targetPos.x -= ANIM_OFFSET_X;
 
             movementManager.fade(win, { to: 0, onComplete: () => win.hide() });
             movementManager.animateWindowPosition(win, targetPos);
@@ -484,6 +490,40 @@ function createFeatureWindows(header, namesToCreate) {
                     listen.webContents.openDevTools({ mode: 'detach' });
                 }
                 windowPool.set('listen', listen);
+                break;
+            }
+
+            case 'translate': {
+                const translate = new BrowserWindow({
+                    ...commonChildOptions,
+                    width: 460,
+                    minWidth: 420,
+                    maxWidth: 900,
+                    maxHeight: 900,
+                });
+                translate.setContentProtection(isContentProtectionOn);
+                translate.setVisibleOnAllWorkspaces(true,{visibleOnFullScreen:true});
+                if (process.platform === 'darwin') {
+                    translate.setWindowButtonVisibility(false);
+                }
+                const translateLoadOptions = { query: { view: 'translate' } };
+                if (!shouldUseLiquidGlass) {
+                    translate.loadFile(path.join(__dirname, '../ui/app/content.html'), translateLoadOptions);
+                }
+                else {
+                    translateLoadOptions.query.glass = 'true';
+                    translate.loadFile(path.join(__dirname, '../ui/app/content.html'), translateLoadOptions);
+                    translate.webContents.once('did-finish-load', () => {
+                        const viewId = liquidGlass.addView(translate.getNativeWindowHandle());
+                        if (viewId !== -1) {
+                            liquidGlass.unstable_setVariant(viewId, liquidGlass.GlassMaterialVariant.bubbles);
+                        }
+                    });
+                }
+                if (!app.isPackaged) {
+                    translate.webContents.openDevTools({ mode: 'detach' });
+                }
+                windowPool.set('translate', translate);
                 break;
             }
 
@@ -600,6 +640,7 @@ function createFeatureWindows(header, namesToCreate) {
         createFeatureWindow(namesToCreate);
     } else {
         createFeatureWindow('listen');
+        createFeatureWindow('translate');
         createFeatureWindow('ask');
         createFeatureWindow('settings');
         createFeatureWindow('shortcut-settings');
@@ -607,7 +648,7 @@ function createFeatureWindows(header, namesToCreate) {
 }
 
 function destroyFeatureWindows() {
-    const featureWindows = ['listen','ask','settings','shortcut-settings'];
+    const featureWindows = ['listen','translate','ask','settings','shortcut-settings'];
     if (settingsHideTimer) {
         clearTimeout(settingsHideTimer);
         settingsHideTimer = null;
@@ -714,7 +755,7 @@ function createWindows() {
     setupWindowController(windowPool, layoutManager, movementManager);
 
     if (currentHeaderState === 'main') {
-        createFeatureWindows(header, ['listen', 'ask', 'settings', 'shortcut-settings']);
+        createFeatureWindows(header, ['listen', 'translate', 'ask', 'settings', 'shortcut-settings']);
     }
 
     header.setContentProtection(isContentProtectionOn);

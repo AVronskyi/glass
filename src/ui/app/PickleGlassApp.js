@@ -1,6 +1,7 @@
 import { html, css, LitElement } from '../assets/lit-core-2.7.4.min.js';
 import { SettingsView } from '../settings/SettingsView.js';
 import { ListenView } from '../listen/ListenView.js';
+import { TranslateView } from '../translate/TranslateView.js';
 import { AskView } from '../ask/AskView.js';
 import { ShortcutSettingsView } from '../settings/ShortCutSettingsView.js';
 
@@ -23,7 +24,7 @@ export class PickleGlassApp extends LitElement {
             height: 100%;
         }
 
-        ask-view, settings-view, history-view, help-view, setup-view {
+        translate-view, ask-view, settings-view, history-view, help-view, setup-view {
             display: block;
             width: 100%;
             height: 100%;
@@ -137,6 +138,8 @@ export class PickleGlassApp extends LitElement {
                 ></listen-view>`;
             case 'ask':
                 return html`<ask-view></ask-view>`;
+            case 'translate':
+                return html`<translate-view></translate-view>`;
             case 'settings':
                 return html`<settings-view
                     .selectedProfile=${this.selectedProfile}
