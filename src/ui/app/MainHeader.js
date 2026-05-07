@@ -3,8 +3,10 @@ import { html, css, LitElement } from '../assets/lit-core-2.7.4.min.js';
 export class MainHeader extends LitElement {
     static properties = {
         isTogglingSession: { type: Boolean, state: true },
+        isTogglingTranslateSession: { type: Boolean, state: true },
         shortcuts: { type: Object, state: true },
         listenSessionStatus: { type: String, state: true },
+        translateSessionStatus: { type: String, state: true },
     };
 
     static styles = css`
@@ -96,6 +98,10 @@ export class MainHeader extends LitElement {
             position: relative;
         }
 
+        .translate-button {
+            width: 98px;
+        }
+
         .listen-button:disabled {
             cursor: default;
             opacity: 0.8;
@@ -121,6 +127,7 @@ export class MainHeader extends LitElement {
         .listen-button.done .listen-icon svg rect,
         .listen-button.done .listen-icon svg path {
             fill: black;
+            stroke: black;
         }
 
         .listen-button.done:hover {
@@ -348,7 +355,9 @@ export class MainHeader extends LitElement {
         this.hasSlidIn = false;
         this.settingsHideTimer = null;
         this.isTogglingSession = false;
+        this.isTogglingTranslateSession = false;
         this.listenSessionStatus = 'beforeSession';
+        this.translateSessionStatus = 'beforeSession';
         this.animationEndTimer = null;
         this.handleAnimationEnd = this.handleAnimationEnd.bind(this);
         this.handleMouseMove = this.handleMouseMove.bind(this);
@@ -363,6 +372,15 @@ export class MainHeader extends LitElement {
             case 'inSession'   : return 'Stop';
             case 'afterSession': return 'Done';
             default            : return 'Listen';
+        }
+    }
+
+    _getTranslateButtonText(status) {
+        switch (status) {
+            case 'beforeSession': return 'Translate';
+            case 'inSession'   : return 'Stop';
+            case 'afterSession': return 'Done';
+            default            : return 'Translate';
         }
     }
 
@@ -473,9 +491,9 @@ export class MainHeader extends LitElement {
 
         if (window.api) {
 
-            this._sessionStateTextListener = (event, { success }) => {
+            this._sessionStateTextListener = (event, { success, status }) => {
                 if (success) {
-                    this.listenSessionStatus = ({
+                    this.listenSessionStatus = status || ({
                         beforeSession: 'inSession',
                         inSession: 'afterSession',
                         afterSession: 'beforeSession',
@@ -486,6 +504,20 @@ export class MainHeader extends LitElement {
                 this.isTogglingSession = false; // ✨ 로딩 상태만 해제
             };
             window.api.mainHeader.onListenChangeSessionResult(this._sessionStateTextListener);
+
+            this._translateSessionStateTextListener = (event, { success, status }) => {
+                if (success) {
+                    this.translateSessionStatus = status || ({
+                        beforeSession: 'inSession',
+                        inSession: 'afterSession',
+                        afterSession: 'beforeSession',
+                    })[this.translateSessionStatus] || 'beforeSession';
+                } else {
+                    this.translateSessionStatus = 'beforeSession';
+                }
+                this.isTogglingTranslateSession = false;
+            };
+            window.api.mainHeader.onTranslateChangeSessionResult(this._translateSessionStateTextListener);
 
             this._shortcutListener = (event, keybinds) => {
                 console.log('[MainHeader] Received updated shortcuts:', keybinds);
@@ -507,6 +539,9 @@ export class MainHeader extends LitElement {
         if (window.api) {
             if (this._sessionStateTextListener) {
                 window.api.mainHeader.removeOnListenChangeSessionResult(this._sessionStateTextListener);
+            }
+            if (this._translateSessionStateTextListener) {
+                window.api.mainHeader.removeOnTranslateChangeSessionResult(this._translateSessionStateTextListener);
             }
             if (this._shortcutListener) {
                 window.api.mainHeader.removeOnShortcutsUpdated(this._shortcutListener);
@@ -545,6 +580,25 @@ export class MainHeader extends LitElement {
         } catch (error) {
             console.error('IPC invoke for session change failed:', error);
             this.isTogglingSession = false;
+        }
+    }
+
+    async _handleTranslateClick() {
+        if (this.wasJustDragged) return;
+        if (this.isTogglingTranslateSession) {
+            return;
+        }
+
+        this.isTogglingTranslateSession = true;
+
+        try {
+            const translateButtonText = this._getTranslateButtonText(this.translateSessionStatus);
+            if (window.api) {
+                await window.api.mainHeader.sendTranslateButtonClick(translateButtonText);
+            }
+        } catch (error) {
+            console.error('IPC invoke for translate session change failed:', error);
+            this.isTogglingTranslateSession = false;
         }
     }
 
@@ -598,12 +652,18 @@ export class MainHeader extends LitElement {
 
     render() {
         const listenButtonText = this._getListenButtonText(this.listenSessionStatus);
+        const translateButtonText = this._getTranslateButtonText(this.translateSessionStatus);
     
         const buttonClasses = {
             active: listenButtonText === 'Stop',
             done: listenButtonText === 'Done',
         };
         const showStopIcon = listenButtonText === 'Stop' || listenButtonText === 'Done';
+        const translateButtonClasses = {
+            active: translateButtonText === 'Stop',
+            done: translateButtonText === 'Done',
+        };
+        const showTranslateStopIcon = translateButtonText === 'Stop' || translateButtonText === 'Done';
 
         return html`
             <div class="header" @mousedown=${this.handleMouseDown}>
@@ -634,6 +694,41 @@ export class MainHeader extends LitElement {
                                             <path d="M1.69922 2.7515C1.69922 2.37153 2.00725 2.0635 2.38722 2.0635H2.73122C3.11119 2.0635 3.41922 2.37153 3.41922 2.7515V8.2555C3.41922 8.63547 3.11119 8.9435 2.73122 8.9435H2.38722C2.00725 8.9435 1.69922 8.63547 1.69922 8.2555V2.7515Z" fill="white"/>
                                             <path d="M5.13922 1.3755C5.13922 0.995528 5.44725 0.6875 5.82722 0.6875H6.17122C6.55119 0.6875 6.85922 0.995528 6.85922 1.3755V9.6315C6.85922 10.0115 6.55119 10.3195 6.17122 10.3195H5.82722C5.44725 10.3195 5.13922 10.0115 5.13922 9.6315V1.3755Z" fill="white"/>
                                             <path d="M8.57922 3.0955C8.57922 2.71553 8.88725 2.4075 9.26722 2.4075H9.61122C9.99119 2.4075 10.2992 2.71553 10.2992 3.0955V7.9115C10.2992 8.29147 9.99119 8.5995 9.61122 8.5995H9.26722C8.88725 8.5995 8.57922 8.29147 8.57922 7.9115V3.0955Z" fill="white"/>
+                                        </svg>
+                                    `}
+                            </div>
+                        `}
+                </button>
+
+                <button 
+                    class="listen-button translate-button ${Object.keys(translateButtonClasses).filter(k => translateButtonClasses[k]).join(' ')}"
+                    @click=${this._handleTranslateClick}
+                    ?disabled=${this.isTogglingTranslateSession}
+                >
+                    ${this.isTogglingTranslateSession
+                        ? html`
+                            <div class="loading-dots">
+                                <span></span><span></span><span></span>
+                            </div>
+                        `
+                        : html`
+                            <div class="action-text">
+                                <div class="action-text-content">${translateButtonText}</div>
+                            </div>
+                            <div class="listen-icon">
+                                ${showTranslateStopIcon
+                                    ? html`
+                                        <svg width="9" height="9" viewBox="0 0 9 9" fill="none" xmlns="http://www.w3.org/2000/svg">
+                                            <rect width="9" height="9" rx="1" fill="white"/>
+                                        </svg>
+                                    `
+                                    : html`
+                                        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                            <path d="M5 8h8" />
+                                            <path d="M9 4v4c0 4-2 7-5 9" />
+                                            <path d="M6 12c1 2 3 4 6 5" />
+                                            <path d="M14 19l3-7 3 7" />
+                                            <path d="M15 17h4" />
                                         </svg>
                                     `}
                             </div>

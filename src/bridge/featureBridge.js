@@ -10,6 +10,7 @@ const presetRepository = require('../features/common/repositories/preset');
 const localAIManager = require('../features/common/services/localAIManager');
 const askService = require('../features/ask/askService');
 const listenService = require('../features/listen/listenService');
+const translateService = require('../features/translate/translateService');
 const permissionService = require('../features/common/services/permissionService');
 const encryptionService = require('../features/common/services/encryptionService');
 
@@ -89,11 +90,14 @@ module.exports = {
     // Listen
     ipcMain.handle('listen:sendMicAudio', async (event, { data, mimeType }) => await listenService.handleSendMicAudioContent(data, mimeType));
     ipcMain.handle('listen:sendSystemAudio', async (event, { data, mimeType }) => {
-        const result = await listenService.sttService.sendSystemAudioContent(data, mimeType);
-        if(result.success) {
+        try {
+            await listenService.sttService.sendSystemAudioContent(data, mimeType);
             listenService.sendToRenderer('system-audio-data', { data });
+            return { success: true };
+        } catch (error) {
+            console.error('[FeatureBridge] listen:sendSystemAudio failed', error.message);
+            return { success: false, error: error.message };
         }
-        return result;
     });
     ipcMain.handle('listen:startMacosSystemAudio', async () => await listenService.handleStartMacosAudio());
     ipcMain.handle('listen:stopMacosSystemAudio', async () => await listenService.handleStopMacosAudio());
@@ -106,6 +110,31 @@ module.exports = {
         return { success: true };
       } catch (error) {
         console.error('[FeatureBridge] listen:changeSession failed', error.message);
+        return { success: false, error: error.message };
+      }
+    });
+
+    // Translate
+    ipcMain.handle('translate:sendSystemAudio', async (event, { data, mimeType }) => {
+        try {
+            await translateService.sttService.sendSystemAudioContent(data, mimeType);
+            translateService.sendToRenderer('translate:system-audio-data', { data });
+            return { success: true };
+        } catch (error) {
+            console.error('[FeatureBridge] translate:sendSystemAudio failed', error.message);
+            return { success: false, error: error.message };
+        }
+    });
+    ipcMain.handle('translate:startMacosSystemAudio', async () => await translateService.handleStartMacosAudio());
+    ipcMain.handle('translate:stopMacosSystemAudio', async () => await translateService.handleStopMacosAudio());
+    ipcMain.handle('translate:isSessionActive', async () => await translateService.isSessionActive());
+    ipcMain.handle('translate:changeSession', async (event, translateButtonText) => {
+      console.log('[FeatureBridge] translate:changeSession from mainheader', translateButtonText);
+      try {
+        await translateService.handleTranslateRequest(translateButtonText);
+        return { success: true };
+      } catch (error) {
+        console.error('[FeatureBridge] translate:changeSession failed', error.message);
         return { success: false, error: error.message };
       }
     });

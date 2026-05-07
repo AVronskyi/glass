@@ -117,12 +117,15 @@ contextBridge.exposeInMainWorld('api', {
     // Generic invoke (for dynamic channel names)
     // invoke: (channel, ...args) => ipcRenderer.invoke(channel, ...args),
     sendListenButtonClick: (listenButtonText) => ipcRenderer.invoke('listen:changeSession', listenButtonText),
+    sendTranslateButtonClick: (translateButtonText) => ipcRenderer.invoke('translate:changeSession', translateButtonText),
     sendAskButtonClick: () => ipcRenderer.invoke('ask:toggleAskButton'),
     sendToggleAllWindowsVisibility: () => ipcRenderer.invoke('shortcut:toggleAllWindowsVisibility'),
     
     // Listeners
     onListenChangeSessionResult: (callback) => ipcRenderer.on('listen:changeSessionResult', callback),
     removeOnListenChangeSessionResult: (callback) => ipcRenderer.removeListener('listen:changeSessionResult', callback),
+    onTranslateChangeSessionResult: (callback) => ipcRenderer.on('translate:changeSessionResult', callback),
+    removeOnTranslateChangeSessionResult: (callback) => ipcRenderer.removeListener('translate:changeSessionResult', callback),
     onShortcutsUpdated: (callback) => ipcRenderer.on('shortcuts-updated', callback),
     removeOnShortcutsUpdated: (callback) => ipcRenderer.removeListener('shortcuts-updated', callback)
   },
@@ -187,6 +190,20 @@ contextBridge.exposeInMainWorld('api', {
     // Listeners
     onSttUpdate: (callback) => ipcRenderer.on('stt-update', callback),
     removeOnSttUpdate: (callback) => ipcRenderer.removeListener('stt-update', callback)
+  },
+
+  // src/ui/translate/TranslateView.js
+  translateView: {
+    adjustWindowHeight: (winName, height) => ipcRenderer.invoke('adjust-window-height', { winName, height }),
+
+    onSessionStateChanged: (callback) => ipcRenderer.on('translate:session-state-changed', callback),
+    removeOnSessionStateChanged: (callback) => ipcRenderer.removeListener('translate:session-state-changed', callback),
+    onTranscriptUpdate: (callback) => ipcRenderer.on('translate:transcript-update', callback),
+    removeOnTranscriptUpdate: (callback) => ipcRenderer.removeListener('translate:transcript-update', callback),
+    onTranslationUpdate: (callback) => ipcRenderer.on('translate:translation-update', callback),
+    removeOnTranslationUpdate: (callback) => ipcRenderer.removeListener('translate:translation-update', callback),
+    onStatusUpdate: (callback) => ipcRenderer.on('translate:status-update', callback),
+    removeOnStatusUpdate: (callback) => ipcRenderer.removeListener('translate:status-update', callback)
   },
 
   // src/ui/listen/summary/SummaryView.js
@@ -301,10 +318,23 @@ contextBridge.exposeInMainWorld('api', {
     removeOnSystemAudioData: (callback) => ipcRenderer.removeListener('system-audio-data', callback)
   },
 
+  // src/ui/listen/audioCore/listenCapture.js for Translate mode
+  translateCapture: {
+    sendSystemAudioContent: (data) => ipcRenderer.invoke('translate:sendSystemAudio', data),
+    startMacosSystemAudio: () => ipcRenderer.invoke('translate:startMacosSystemAudio'),
+    stopMacosSystemAudio: () => ipcRenderer.invoke('translate:stopMacosSystemAudio'),
+    isSessionActive: () => ipcRenderer.invoke('translate:isSessionActive'),
+
+    onSystemAudioData: (callback) => ipcRenderer.on('translate:system-audio-data', callback),
+    removeOnSystemAudioData: (callback) => ipcRenderer.removeListener('translate:system-audio-data', callback)
+  },
+
   // src/ui/listen/audioCore/renderer.js
   renderer: {
     // Listeners
     onChangeListenCaptureState: (callback) => ipcRenderer.on('change-listen-capture-state', callback),
-    removeOnChangeListenCaptureState: (callback) => ipcRenderer.removeListener('change-listen-capture-state', callback)
+    removeOnChangeListenCaptureState: (callback) => ipcRenderer.removeListener('change-listen-capture-state', callback),
+    onChangeTranslateCaptureState: (callback) => ipcRenderer.on('change-translate-capture-state', callback),
+    removeOnChangeTranslateCaptureState: (callback) => ipcRenderer.removeListener('change-translate-capture-state', callback)
   }
 });

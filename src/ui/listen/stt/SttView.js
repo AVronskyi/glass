@@ -129,6 +129,18 @@ export class SttView extends LitElement {
 
         const newMessages = [...this.sttMessages];
         const targetIdx = findLastPartialIdx(speaker);
+        const lastMessage = newMessages[newMessages.length - 1];
+
+        if (
+            isFinal
+            && targetIdx === -1
+            && lastMessage
+            && lastMessage.speaker === speaker
+            && lastMessage.isFinal
+            && lastMessage.text === text
+        ) {
+            return;
+        }
 
         if (isPartial) {
             if (targetIdx !== -1) {

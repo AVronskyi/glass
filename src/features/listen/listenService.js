@@ -62,6 +62,7 @@ class ListenService {
             switch (listenButtonText) {
                 case 'Listen':
                     console.log('[ListenService] changeSession to "Listen"');
+                    await require('../translate/translateService').stopForModeSwitch();
                     internalBridge.emit('window:requestVisibility', { name: 'listen', visible: true });
                     await this.initializeSession();
                     if (listenWindow && !listenWindow.isDestroyed()) {
@@ -80,18 +81,25 @@ class ListenService {
                 case 'Done':
                     console.log('[ListenService] changeSession to "Done"');
                     internalBridge.emit('window:requestVisibility', { name: 'listen', visible: false });
-                    listenWindow.webContents.send('session-state-changed', { isActive: false });
+                    if (listenWindow && !listenWindow.isDestroyed()) {
+                        listenWindow.webContents.send('session-state-changed', { isActive: false });
+                    }
                     break;
         
                 default:
                     throw new Error(`[ListenService] unknown listenButtonText: ${listenButtonText}`);
             }
             
-            header.webContents.send('listen:changeSessionResult', { success: true });
+            const nextStatus = ({
+                Listen: 'inSession',
+                Stop: 'afterSession',
+                Done: 'beforeSession',
+            })[listenButtonText] || 'beforeSession';
+            header.webContents.send('listen:changeSessionResult', { success: true, status: nextStatus });
 
         } catch (error) {
             console.error('[ListenService] error in handleListenRequest:', error);
-            header.webContents.send('listen:changeSessionResult', { success: false });
+            header.webContents.send('listen:changeSessionResult', { success: false, status: 'beforeSession' });
             throw error; 
         }
     }

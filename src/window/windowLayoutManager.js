@@ -149,11 +149,15 @@ class WindowLayoutManager {
     
         const ask = this.windowPool.get('ask');
         const listen = this.windowPool.get('listen');
+        const translate = this.windowPool.get('translate');
     
         const askVis = visibility.ask && ask && !ask.isDestroyed();
         const listenVis = visibility.listen && listen && !listen.isDestroyed();
+        const translateVis = visibility.translate && translate && !translate.isDestroyed();
+        const sideName = listenVis ? 'listen' : (translateVis ? 'translate' : null);
+        const sideWin = sideName === 'listen' ? listen : (sideName === 'translate' ? translate : null);
     
-        if (!askVis && !listenVis) return {};
+        if (!askVis && !sideName) return {};
     
         const PAD = 8;
         const headerTopRel = headerBounds.y - workAreaY;
@@ -165,36 +169,36 @@ class WindowLayoutManager {
         const strategy = this.determineLayoutStrategy(headerBounds, screenWidth, screenHeight, relativeX, relativeY, workAreaX, workAreaY);
     
         const askB = askVis ? ask.getBounds() : null;
-        const listenB = listenVis ? listen.getBounds() : null;
+        const sideB = sideWin ? sideWin.getBounds() : null;
 
     
         const layout = {};
     
-        if (askVis && listenVis) {
+        if (askVis && sideName) {
             let askXRel = headerCenterXRel - (askB.width / 2);
-            let listenXRel = askXRel - listenB.width - PAD;
+            let sideXRel = askXRel - sideB.width - PAD;
     
-            if (listenXRel < PAD) {
-                listenXRel = PAD;
-                askXRel = listenXRel + listenB.width + PAD;
+            if (sideXRel < PAD) {
+                sideXRel = PAD;
+                askXRel = sideXRel + sideB.width + PAD;
             }
             if (askXRel + askB.width > screenWidth - PAD) {
                 askXRel = screenWidth - PAD - askB.width;
-                listenXRel = askXRel - listenB.width - PAD;
+                sideXRel = askXRel - sideB.width - PAD;
             }
             
             if (strategy.primary === 'above') {
                 const windowBottomAbs = headerBounds.y - PAD;
                 layout.ask = { x: Math.round(askXRel + workAreaX), y: Math.round(windowBottomAbs - askB.height), width: askB.width, height: askB.height };
-                layout.listen = { x: Math.round(listenXRel + workAreaX), y: Math.round(windowBottomAbs - listenB.height), width: listenB.width, height: listenB.height };
+                layout[sideName] = { x: Math.round(sideXRel + workAreaX), y: Math.round(windowBottomAbs - sideB.height), width: sideB.width, height: sideB.height };
             } else { // 'below'
                 const yAbs = headerBounds.y + headerBounds.height + PAD;
                 layout.ask = { x: Math.round(askXRel + workAreaX), y: Math.round(yAbs), width: askB.width, height: askB.height };
-                layout.listen = { x: Math.round(listenXRel + workAreaX), y: Math.round(yAbs), width: listenB.width, height: listenB.height };
+                layout[sideName] = { x: Math.round(sideXRel + workAreaX), y: Math.round(yAbs), width: sideB.width, height: sideB.height };
             }
         } else { // Single window
-            const winName = askVis ? 'ask' : 'listen';
-            const winB = askVis ? askB : listenB;
+            const winName = askVis ? 'ask' : sideName;
+            const winB = askVis ? askB : sideB;
             if (!winB) return {};
     
             let xRel = headerCenterXRel - winB.width / 2;

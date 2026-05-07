@@ -35,6 +35,10 @@ const BUFFER_SIZE = 4096;
 
 const isLinux = window.api.platform.isLinux;
 const isMacOS = window.api.platform.isMacOS;
+const params = new URLSearchParams(window.location.search);
+const captureView = params.get('view') === 'translate' ? 'translate' : 'listen';
+const captureApi = captureView === 'translate' ? window.api.translateCapture : window.api.listenCapture;
+const shouldCaptureMic = captureView !== 'translate';
 
 let mediaStream = null;
 let micMediaStream = null;
@@ -190,7 +194,7 @@ function runAecSync(micF32, sysF32) {
 
 
 // System audio data handler
-window.api.listenCapture.onSystemAudioData((event, { data }) => {
+captureApi?.onSystemAudioData?.((event, { data }) => {
     systemAudioBuffer.push({
         data: data,
         timestamp: Date.now(),
@@ -328,7 +332,7 @@ async function setupMicProcessing(micStream) {
             const pcm16 = convertFloat32ToInt16(processedChunk);
             const b64 = arrayBufferToBase64(pcm16.buffer);
 
-            window.api.listenCapture.sendMicAudioContent({
+            captureApi.sendMicAudioContent({
                 data: b64,
                 mimeType: 'audio/pcm;rate=24000',
             });
@@ -361,7 +365,7 @@ function setupLinuxMicProcessing(micStream) {
             const pcmData16 = convertFloat32ToInt16(chunk);
             const base64Data = arrayBufferToBase64(pcmData16.buffer);
 
-            await window.api.listenCapture.sendMicAudioContent({
+            await captureApi.sendMicAudioContent({
                 data: base64Data,
                 mimeType: 'audio/pcm;rate=24000',
             });
@@ -395,7 +399,7 @@ function setupSystemAudioProcessing(systemStream) {
             const base64Data = arrayBufferToBase64(pcmData16.buffer);
 
             try {
-                await window.api.listenCapture.sendSystemAudioContent({
+                await captureApi.sendSystemAudioContent({
                     data: base64Data,
                     mimeType: 'audio/pcm;rate=24000',
                 });
@@ -423,7 +427,7 @@ async function startCapture(screenshotIntervalSeconds = 5, imageQuality = 'mediu
     try {
         if (isMacOS) {
 
-            const sessionActive = await window.api.listenCapture.isSessionActive();
+            const sessionActive = await captureApi.isSessionActive();
             if (!sessionActive) {
                 throw new Error('STT sessions not initialized - please wait for initialization to complete');
             }
@@ -432,15 +436,15 @@ async function startCapture(screenshotIntervalSeconds = 5, imageQuality = 'mediu
             console.log('Starting macOS capture with SystemAudioDump...');
 
             // Start macOS audio capture
-            const audioResult = await window.api.listenCapture.startMacosSystemAudio();
+            const audioResult = await captureApi.startMacosSystemAudio();
             if (!audioResult.success) {
                 console.warn('[listenCapture] macOS audio start failed:', audioResult.error);
 
                 // 이미 실행 중 → stop 후 재시도
                 if (audioResult.error === 'already_running') {
-                    await window.api.listenCapture.stopMacosSystemAudio();
+                    await captureApi.stopMacosSystemAudio();
                     await new Promise(r => setTimeout(r, 500));
-                    const retry = await window.api.listenCapture.startMacosSystemAudio();
+                    const retry = await captureApi.startMacosSystemAudio();
                     if (!retry.success) {
                         throw new Error('Retry failed: ' + retry.error);
                     }
@@ -449,31 +453,33 @@ async function startCapture(screenshotIntervalSeconds = 5, imageQuality = 'mediu
                 }
             }
 
-            try {
-                micMediaStream = await navigator.mediaDevices.getUserMedia({
-                    audio: {
-                        sampleRate: SAMPLE_RATE,
-                        channelCount: 1,
-                        echoCancellation: true,
-                        noiseSuppression: true,
-                        autoGainControl: true,
-                    },
-                    video: false,
-                });
+            if (shouldCaptureMic) {
+                try {
+                    micMediaStream = await navigator.mediaDevices.getUserMedia({
+                        audio: {
+                            sampleRate: SAMPLE_RATE,
+                            channelCount: 1,
+                            echoCancellation: true,
+                            noiseSuppression: true,
+                            autoGainControl: true,
+                        },
+                        video: false,
+                    });
 
-                console.log('macOS microphone capture started');
-                const { context, processor } = await setupMicProcessing(micMediaStream);
-                audioContext = context;
-                audioProcessor = processor;
-            } catch (micErr) {
-                console.warn('Failed to get microphone on macOS:', micErr);
+                    console.log('macOS microphone capture started');
+                    const { context, processor } = await setupMicProcessing(micMediaStream);
+                    audioContext = context;
+                    audioProcessor = processor;
+                } catch (micErr) {
+                    console.warn('Failed to get microphone on macOS:', micErr);
+                }
             }
             ////////// for index & subjects //////////
 
             console.log('macOS screen capture started - audio handled by SystemAudioDump');
         } else if (isLinux) {
 
-            const sessionActive = await window.api.listenCapture.isSessionActive();
+            const sessionActive = await captureApi.isSessionActive();
             if (!sessionActive) {
                 throw new Error('STT sessions not initialized - please wait for initialization to complete');
             }
@@ -490,25 +496,27 @@ async function startCapture(screenshotIntervalSeconds = 5, imageQuality = 'mediu
 
             // Get microphone input for Linux
             let micMediaStream = null;
-            try {
-                micMediaStream = await navigator.mediaDevices.getUserMedia({
-                    audio: {
-                        sampleRate: SAMPLE_RATE,
-                        channelCount: 1,
-                        echoCancellation: true,
-                        noiseSuppression: true,
-                        autoGainControl: true,
-                    },
-                    video: false,
-                });
+            if (shouldCaptureMic) {
+                try {
+                    micMediaStream = await navigator.mediaDevices.getUserMedia({
+                        audio: {
+                            sampleRate: SAMPLE_RATE,
+                            channelCount: 1,
+                            echoCancellation: true,
+                            noiseSuppression: true,
+                            autoGainControl: true,
+                        },
+                        video: false,
+                    });
 
-                console.log('Linux microphone capture started');
+                    console.log('Linux microphone capture started');
 
-                // Setup audio processing for microphone on Linux
-                setupLinuxMicProcessing(micMediaStream);
-            } catch (micError) {
-                console.warn('Failed to get microphone access on Linux:', micError);
-                // Continue without microphone if permission denied
+                    // Setup audio processing for microphone on Linux
+                    setupLinuxMicProcessing(micMediaStream);
+                } catch (micError) {
+                    console.warn('Failed to get microphone access on Linux:', micError);
+                    // Continue without microphone if permission denied
+                }
             }
 
             console.log('Linux screen capture started');
@@ -517,29 +525,31 @@ async function startCapture(screenshotIntervalSeconds = 5, imageQuality = 'mediu
             console.log('Starting Windows capture with native loopback audio...');
 
             // Ensure STT sessions are initialized before starting audio capture
-            const sessionActive = await window.api.listenCapture.isSessionActive();
+            const sessionActive = await captureApi.isSessionActive();
             if (!sessionActive) {
                 throw new Error('STT sessions not initialized - please wait for initialization to complete');
             }
 
             // 1. Get user's microphone
-            try {
-                micMediaStream = await navigator.mediaDevices.getUserMedia({
-                    audio: {
-                        sampleRate: SAMPLE_RATE,
-                        channelCount: 1,
-                        echoCancellation: true,
-                        noiseSuppression: true,
-                        autoGainControl: true,
-                    },
-                    video: false,
-                });
-                console.log('Windows microphone capture started');
-                const { context, processor } = await setupMicProcessing(micMediaStream);
-                audioContext = context;
-                audioProcessor = processor;
-            } catch (micErr) {
-                console.warn('Could not get microphone access on Windows:', micErr);
+            if (shouldCaptureMic) {
+                try {
+                    micMediaStream = await navigator.mediaDevices.getUserMedia({
+                        audio: {
+                            sampleRate: SAMPLE_RATE,
+                            channelCount: 1,
+                            echoCancellation: true,
+                            noiseSuppression: true,
+                            autoGainControl: true,
+                        },
+                        video: false,
+                    });
+                    console.log('Windows microphone capture started');
+                    const { context, processor } = await setupMicProcessing(micMediaStream);
+                    audioContext = context;
+                    audioProcessor = processor;
+                } catch (micErr) {
+                    console.warn('Could not get microphone access on Windows:', micErr);
+                }
             }
 
             // 2. Get system audio using native Electron loopback
@@ -604,7 +614,7 @@ function stopCapture() {
 
     // Stop macOS audio capture if running
     if (isMacOS) {
-        window.api.listenCapture.stopMacosSystemAudio().catch(err => {
+        captureApi.stopMacosSystemAudio().catch(err => {
             console.error('Error stopping macOS audio:', err);
         });
     }

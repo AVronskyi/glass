@@ -9,7 +9,8 @@
       "Read(//tmp/**)",
       "Bash(node -e \"const j=require\\('/tmp/or-models.json'\\);const ds=j.data.filter\\(m=>m.id.includes\\('deepseek'\\)\\);console.log\\('DeepSeek models:'\\);ds.forEach\\(m=>console.log\\('  '+m.id+'  \\('+m.name+'\\)'\\)\\);\")",
       "Bash(curl -sLk 'https://openrouter.ai/api/v1/models' -o /tmp/or-models.json)",
-      "Bash(node -e \"const j=require\\('/tmp/or-models.json'\\);const ds=j.data.filter\\(m=>m.id.toLowerCase\\(\\).includes\\('deepseek'\\)\\);console.log\\('DeepSeek models:'\\);ds.forEach\\(m=>console.log\\('  '+m.id+'  \\('+m.name+'\\)'\\)\\);console.log\\('total models:', j.data.length\\);\")"
+      "Bash(node -e \"const j=require\\('/tmp/or-models.json'\\);const ds=j.data.filter\\(m=>m.id.toLowerCase\\(\\).includes\\('deepseek'\\)\\);console.log\\('DeepSeek models:'\\);ds.forEach\\(m=>console.log\\('  '+m.id+'  \\('+m.name+'\\)'\\)\\);console.log\\('total models:', j.data.length\\);\")",
+      "Bash(node --check src/features/common/services/authService.js)"
     ]
   }
 }
