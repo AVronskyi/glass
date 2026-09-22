@@ -1,5 +1,14 @@
 import { html, css, LitElement } from '../assets/lit-core-2.7.4.min.js';
 
+// An hour-long session would otherwise grow the array and the DOM without bound.
+// Oldest fragments are dropped; Copy returns whatever is still on screen.
+const MAX_TRANSLATION_CARDS = 100;
+
+// Fragments are committed speech chunks of a few seconds each, so they are joined
+// into running paragraphs rather than shown as separate cards. A paragraph closes
+// once it is long enough to read AND the speaker reached a sentence boundary.
+const PARAGRAPH_MIN_CHARS = 180;
+
 export class TranslateView extends LitElement {
     static styles = css`
         :host {
@@ -141,7 +150,7 @@ export class TranslateView extends LitElement {
         .content {
             display: flex;
             flex-direction: column;
-            gap: 10px;
+            gap: 14px;
             padding: 12px;
             overflow-y: auto;
             max-height: 660px;
@@ -171,23 +180,29 @@ export class TranslateView extends LitElement {
             border-radius: 4px;
         }
 
-        .translation-card {
+        .paragraph {
             display: flex;
             flex-direction: column;
-            gap: 7px;
-            padding: 10px 12px;
-            border-radius: 8px;
-            background: rgba(255, 255, 255, 0.09);
-            border: 1px solid rgba(255, 255, 255, 0.08);
+            gap: 5px;
         }
 
         .translation-text {
             color: rgba(255, 255, 255, 0.96);
             font-size: 16px;
-            line-height: 1.42;
+            line-height: 1.45;
             letter-spacing: 0;
-            white-space: pre-wrap;
             overflow-wrap: anywhere;
+        }
+
+        /* Committed: the provider froze this source, so this text never moves again. */
+        .chunk-final {
+            color: rgba(255, 255, 255, 0.96);
+        }
+
+        /* Draft: live translation of an interim the provider may still revise.
+           Dimmed so the eye reads the settled text and treats this as a preview. */
+        .chunk-draft {
+            color: rgba(255, 255, 255, 0.55);
         }
 
         .streaming-cursor {
@@ -233,7 +248,6 @@ export class TranslateView extends LitElement {
         :host-context(body.has-glass) .translate-container,
         :host-context(body.has-glass) .top-bar,
         :host-context(body.has-glass) .copy-button,
-        :host-context(body.has-glass) .translation-card,
         :host-context(body.has-glass) .partial {
             background: transparent !important;
             border: none !important;
@@ -257,7 +271,6 @@ export class TranslateView extends LitElement {
         }
 
         :host-context(body.has-glass) .translate-container,
-        :host-context(body.has-glass) .translation-card,
         :host-context(body.has-glass) .copy-button {
             border-radius: 0 !important;
         }
@@ -376,6 +389,9 @@ export class TranslateView extends LitElement {
 
         if (existingIndex === -1) {
             nextTranslations.push(nextItem);
+            if (nextTranslations.length > MAX_TRANSLATION_CARDS) {
+                nextTranslations.splice(0, nextTranslations.length - MAX_TRANSLATION_CARDS);
+            }
         } else {
             nextTranslations[existingIndex] = {
                 ...nextTranslations[existingIndex],
@@ -414,13 +430,36 @@ export class TranslateView extends LitElement {
         }
     }
 
+    // Groups the flat fragment list into readable paragraphs. Pure function of
+    // `translations` — no extra state and no change to the upsert contract.
+    getParagraphs() {
+        const paragraphs = [];
+        let current = [];
+        let length = 0;
+
+        for (const item of this.translations) {
+            if (!item.translation && !item.sourceText) continue;
+            current.push(item);
+            length += (item.translation || '').length;
+
+            const endsSentence = /[.!?…]["')\]]?\s*$/.test(item.translation || '');
+            if (item.isFinal && endsSentence && length >= PARAGRAPH_MIN_CHARS) {
+                paragraphs.push(current);
+                current = [];
+                length = 0;
+            }
+        }
+
+        if (current.length) paragraphs.push(current);
+        return paragraphs;
+    }
+
     getCopyText() {
-        return this.translations
-            .filter(item => item.translation || item.sourceText)
-            .map(item => [
-                item.translation || '',
-                item.sourceText ? `EN: ${item.sourceText}` : '',
-            ].filter(Boolean).join('\n'))
+        return this.getParagraphs()
+            .map(items => [
+                items.map(item => item.translation || '').filter(Boolean).join(' '),
+                items.map(item => item.sourceText || '').filter(Boolean).join(' '),
+            ].filter(Boolean).join('\nEN: '))
             .join('\n\n');
     }
 
@@ -487,14 +526,15 @@ export class TranslateView extends LitElement {
         setTimeout(() => this.adjustWindowHeight(), 200);
     }
 
-    renderTranslation(item) {
-        const text = item.translation || '';
+    renderParagraph(items) {
         return html`
-            <div class="translation-card">
-                <div class="translation-text">${text || '…'}${item.isStreaming
-                    ? html`<span class="streaming-cursor">▍</span>`
-                    : html``}</div>
-                <div class="source-text">${item.sourceText}</div>
+            <div class="paragraph">
+                <div class="translation-text">${items.map((item, index) => html`<span
+                        class="${item.isFinal ? 'chunk-final' : 'chunk-draft'}"
+                    >${index > 0 ? ' ' : ''}${item.translation || (item.isFinal ? '' : '…')}</span>${item.isStreaming
+                        ? html`<span class="streaming-cursor">▍</span>`
+                        : html``}`)}</div>
+                <div class="source-text">${items.map(item => item.sourceText || '').filter(Boolean).join(' ')}</div>
             </div>
         `;
     }
@@ -527,7 +567,7 @@ export class TranslateView extends LitElement {
                 <div class="content">
                     ${this.translations.length === 0
                         ? html`<div class="empty-state">Waiting for English audio...</div>`
-                        : html`${this.translations.map(item => this.renderTranslation(item))}`}
+                        : html`${this.getParagraphs().map(items => this.renderParagraph(items))}`}
                 </div>
             </div>
         `;

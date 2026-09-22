@@ -9,23 +9,75 @@ function getPositiveEnvNumber(name, fallback, min = 0) {
 }
 
 const TRANSLATION_COMPLETION_DEBOUNCE_MS = getPositiveEnvNumber('PICKLE_TRANSLATE_DEBOUNCE_MS', 2000, 50);
-const TRANSLATE_WHISPER_CHUNK_SECONDS    = getPositiveEnvNumber('PICKLE_TRANSLATE_WHISPER_CHUNK_SECONDS', 1.0, 0.4);
-const TRANSLATE_WHISPER_INTERVAL_MS      = getPositiveEnvNumber('PICKLE_TRANSLATE_WHISPER_INTERVAL_MS', 250, 100);
 const TRANSLATION_TEMPERATURE            = getPositiveEnvNumber('PICKLE_TRANSLATE_TEMPERATURE', 0.1, 0);
 const TRANSLATION_MAX_TOKENS             = getPositiveEnvNumber('PICKLE_TRANSLATE_MAX_TOKENS', 1024, 64);
 const SEGMENT_GAP_RESET_MS               = getPositiveEnvNumber('PICKLE_TRANSLATE_SEGMENT_GAP_MS', 4000, 500);
 const PARTIAL_MIN_CHARS                  = getPositiveEnvNumber('PICKLE_TRANSLATE_MIN_PARTIAL_CHARS', 4, 1);
-const CONTEXT_TURNS                      = getPositiveEnvNumber('PICKLE_TRANSLATE_CONTEXT_TURNS', 2, 0);
-const MAX_BUFFER_CHARS                   = getPositiveEnvNumber('PICKLE_TRANSLATE_MAX_BUFFER_CHARS', 250, 80);
+const CONTEXT_TURNS                      = getPositiveEnvNumber('PICKLE_TRANSLATE_CONTEXT_TURNS', 4, 0);
+const MIN_PARTIAL_GROWTH_CHARS           = getPositiveEnvNumber('PICKLE_TRANSLATE_MIN_PARTIAL_GROWTH_CHARS', 30, 0);
+
+// STT and translation are deliberately two different providers with two different
+// keys: Deepgram streams interim results over a websocket (~1s to first card),
+// OpenRouter has no streaming STT and is chunk-bound (~6s). The openrouter STT path
+// stays available under PICKLE_TRANSLATE_STT_PROVIDER for A/B tests on live audio.
+const STT_PROVIDER_LABELS = { deepgram: 'Deepgram', openrouter: 'OpenRouter' };
+const TRANSLATE_STT_PROVIDER = STT_PROVIDER_LABELS[process.env.PICKLE_TRANSLATE_STT_PROVIDER]
+    ? process.env.PICKLE_TRANSLATE_STT_PROVIDER
+    : 'deepgram';
+const TRANSLATE_STT_LABEL = STT_PROVIDER_LABELS[TRANSLATE_STT_PROVIDER];
+const TRANSLATE_STT_MODEL = process.env.PICKLE_TRANSLATE_STT_MODEL
+    || (TRANSLATE_STT_PROVIDER === 'deepgram' ? 'nova-3' : 'google/gemini-2.5-flash');
 
 const TRANSLATE_LLM_PROVIDER = 'openrouter';
-const TRANSLATE_LLM_MODEL    = 'google/gemini-2.5-flash-lite';
-const TRANSLATE_STT_MODEL    = process.env.PICKLE_TRANSLATE_WHISPER_MODEL || 'whisper-base';
-const MISSING_KEY_ERROR      = 'Live translate requires an OpenRouter API key. Add it in Settings.';
-const MISSING_KEY_STATUS     = 'No OpenRouter key. Open Settings → API Keys → OpenRouter.';
+const TRANSLATE_LLM_MODEL = process.env.PICKLE_TRANSLATE_LLM_MODEL || 'google/gemini-2.5-flash';
+const TRANSLATE_STT_CHUNK_SECONDS = getPositiveEnvNumber('PICKLE_TRANSLATE_STT_CHUNK_SECONDS', 5, 1);
+
+const MISSING_KEY_ERROR   = 'Live translate requires an OpenRouter API key. Add it in Settings.';
+const MISSING_KEY_STATUS  = 'No OpenRouter key. Open Settings → API Keys → OpenRouter.';
+const MISSING_STT_KEY_STATUS = `No ${TRANSLATE_STT_LABEL} key. Open Settings → API Keys → ${TRANSLATE_STT_LABEL}.`;
 
 const ABORT_REASON_NEWER_CHUNK = 'newer-chunk';
 const ABORT_REASON_SESSION_CLOSED = 'session-closed';
+
+const TRANSLATION_SYSTEM_PROMPT = [
+    'You are a professional simultaneous interpreter rendering live English speech into Ukrainian subtitles.',
+    '',
+    'Rules:',
+    '- Output ONLY the Ukrainian translation. No prefaces, no notes, no explanations, no transliteration, no surrounding quotes.',
+    '- Translate meaning, not words. Never copy English word order or English grammatical structure. The result must read as if a Ukrainian speaker said it.',
+    '- Avoid calques and anglicisms where a normal Ukrainian word exists. Prefer active voice and drop redundant pronouns.',
+    "- Preserve the speaker's register: casual speech stays casual, technical speech stays technical. Do not formalize filler-heavy speech into bureaucratic Ukrainian.",
+    '- Keep verbatim: personal and product names, numbers, currencies, URLs, file paths, code identifiers, CLI commands, and English tech terms Ukrainian speakers normally leave untranslated (deploy, pull request, backend).',
+    '- The input is a live caption and may start or end mid-sentence. Translate exactly what is given. Never invent, complete or summarize.',
+    '- If the input is already Ukrainian or another non-English language, output it unchanged.',
+].join('\n');
+
+// Static few-shot pairs — the strongest lever on register for a mid-tier model, and
+// constant so the whole prompt prefix stays cacheable. Each targets a specific trap:
+// idiomatic filler, "does that make sense", hedging, and a mid-sentence fragment.
+const TRANSLATION_FEW_SHOT = [
+    { role: 'user',      content: "So we're gonna go ahead and ship this on Friday, does that make sense?" },
+    { role: 'assistant', content: "Тож ми викотимо це в п'ятницю, зрозуміло?" },
+    { role: 'user',      content: 'Let me just share my screen real quick.' },
+    { role: 'assistant', content: 'Зараз швидко покажу екран.' },
+    { role: 'user',      content: "I mean, it's not a big deal, but it would be nice to have." },
+    { role: 'assistant', content: 'Ну, це не критично, але було б непогано мати.' },
+    { role: 'user',      content: 'and then the backend just kind of' },
+    { role: 'assistant', content: 'а потім бекенд просто якось' },
+];
+
+// Deepgram's smart_format rewrites an unformatted interim ("ship this on friday")
+// into a punctuated final ("Ship this on Friday."), which a raw startsWith would
+// read as a different string. Compare on letters/digits only so a genuine
+// continuation still counts as one, while a real shrink (hard-cap flush handing
+// back only the front portion) is still rejected.
+const normalizeForPrefix = text => String(text || '').toLowerCase().replace(/[^\p{L}\p{N}]+/gu, ' ').trim();
+
+function isSourceExtension(oldSrc, newSrc) {
+    const previous = normalizeForPrefix(oldSrc);
+    const next = normalizeForPrefix(newSrc);
+    return previous.length > 0 && next.length >= previous.length && next.startsWith(previous);
+}
 
 class TranslateService {
     constructor() {
@@ -35,19 +87,17 @@ class TranslateService {
             systemAudioChannel: 'translate:system-audio-data',
             enabledSpeakers: ['Them'],
             completionDebounceMs: TRANSLATION_COMPLETION_DEBOUNCE_MS,
-            maxCompletionBufferChars: MAX_BUFFER_CHARS,
             readyStatusText: 'Listening for English...',
             respectLanguageEnv: false,
-            modelInfoOverride: {
-                provider: 'whisper',
-                model: TRANSLATE_STT_MODEL,
-                apiKey: 'local',
+            // Resolved at session start so a key added in Settings mid-run is picked up.
+            modelInfoOverride: async () => {
+                const apiKey = (await modelStateService.getAllApiKeys())?.[TRANSLATE_STT_PROVIDER];
+                if (!apiKey) throw new Error(MISSING_STT_KEY_STATUS);
+                return { provider: TRANSLATE_STT_PROVIDER, model: TRANSLATE_STT_MODEL, apiKey };
             },
             providerOptions: {
-                whisperMode: 'server',
-                whisperLanguage: 'en',
-                chunkSeconds: TRANSLATE_WHISPER_CHUNK_SECONDS,
-                processingIntervalMs: TRANSLATE_WHISPER_INTERVAL_MS,
+                language: 'en',
+                chunkSeconds: TRANSLATE_STT_CHUNK_SECONDS,
             },
         });
 
@@ -62,13 +112,10 @@ class TranslateService {
 
     setupServiceCallbacks() {
         this.sttService.setCallbacks({
-            onPartialTranscript: (speaker, text) => {
+            onStreamSegment: (speaker, text, isCommitted) => {
                 if (speaker !== 'Them') return;
-                this.handlePartial(text);
-            },
-            onTranscriptionComplete: (speaker, text) => {
-                if (speaker !== 'Them') return;
-                this.handleFinal(text);
+                if (isCommitted) this.handleCommit(text);
+                else this.handleDraft(text);
             },
             onStatusUpdate: (status) => {
                 this.sendToRenderer('translate:status-update', { status });
@@ -178,7 +225,10 @@ class TranslateService {
             return true;
         } catch (error) {
             console.error('[TranslateService] Failed to initialize translate session:', error);
-            this.sendToRenderer('translate:status-update', { status: 'Translation initialization failed.' });
+            const status = error?.message === MISSING_STT_KEY_STATUS
+                ? MISSING_STT_KEY_STATUS
+                : 'Translation initialization failed.';
+            this.sendToRenderer('translate:status-update', { status });
             return false;
         } finally {
             this.isInitializingSession = false;
@@ -219,7 +269,21 @@ class TranslateService {
         return segment;
     }
 
-    handlePartial(text) {
+    // The draft tail is re-translated from scratch on every pass, so without a
+    // growth gate Deepgram's ~150 ms interims would start a fresh pass as fast as
+    // the LLM can finish one. The first pass of a segment is never gated, so
+    // time-to-first-text is unaffected.
+    shouldRetranslate(segment) {
+        if (segment.streamInFlight) return false;
+        if (segment.sourceText === segment.lastSentText) return false;
+        if (!segment.lastSentText) return true;
+        return segment.sourceText.length - segment.lastSentText.length >= MIN_PARTIAL_GROWTH_CHARS;
+    }
+
+    // Revisable text: the tail the provider has not frozen yet. Its translation is
+    // allowed to churn — it is rendered as the dim tail and nothing downstream
+    // treats it as settled.
+    handleDraft(text) {
         if (!this.isSessionAlive()) return;
         const sourceText = String(text || '').trim();
         if (sourceText.length < PARTIAL_MIN_CHARS) return;
@@ -236,14 +300,15 @@ class TranslateService {
         segment.sourceText = sourceText;
         segment.lastUpdateTs = now;
 
-        // Wait for the current stream to finish before starting a new one — the
-        // finally hook in kickoffTranslate will re-run with the updated buffer.
-        if (!segment.streamInFlight) {
+        if (this.shouldRetranslate(segment)) {
             this.kickoffTranslate(segment, false);
         }
     }
 
-    handleFinal(text) {
+    // Frozen text: the provider will never revise this range. Whatever we render
+    // for it now stays on screen for the rest of the session, so this is the only
+    // place a translation becomes permanent.
+    handleCommit(text) {
         if (!this.isSessionAlive()) return;
         const sourceText = String(text || '').trim();
         if (!sourceText) return;
@@ -253,10 +318,21 @@ class TranslateService {
             segment = this.createSegment(sourceText);
         }
 
+        // The commit usually only re-punctuates the interim the draft already
+        // translated. Freezing that translation as-is costs no request and, more
+        // importantly, spares the reader a re-word at the moment of commit.
+        if (!segment.streamInFlight
+            && segment.translation
+            && normalizeForPrefix(segment.lastSentText) === normalizeForPrefix(sourceText)) {
+            segment.sourceText = sourceText;
+            this.finalizeSegment(segment, segment.translation, true, sourceText);
+            return;
+        }
+
         segment.sourceText = sourceText;
         segment.lastUpdateTs = Date.now();
         segment.isFinalizing = true;
-        // Final pass force-aborts any in-flight partial and produces the canonical translation.
+        // Force-aborts any in-flight draft and produces the permanent translation.
         this.kickoffTranslate(segment, true);
     }
 
@@ -269,16 +345,11 @@ class TranslateService {
         segment.abortController = segmentAbort;
 
         // Stabilization snapshot is only valid when we're re-translating an
-        // EXTENSION of the previous text (text grew from new whisper chunks).
-        // If the source shrunk or changed — e.g. handleFinal switched from the
-        // full buffer to a smaller front-portion after a hard-cap flush — the
-        // old translation no longer applies and would cause a visible "shrink"
-        // when the new (correct, shorter) translation completes.
-        const oldSrc = segment.lastSentText || '';
-        const newSrc = segment.sourceText || '';
-        const isExtension = oldSrc.length > 0
-            && newSrc.length >= oldSrc.length
-            && newSrc.startsWith(oldSrc);
+        // EXTENSION of the previous text (text grew from new STT results).
+        // If the source shrunk or changed — e.g. the commit corrected a word the
+        // draft had mis-heard — the old translation no longer applies and would
+        // cause a visible "shrink" when the new translation completes.
+        const isExtension = isSourceExtension(segment.lastSentText, segment.sourceText);
         segment.previousFullTranslation = isExtension ? (segment.translation || '') : '';
 
         segment.lastSentText = segment.sourceText;
@@ -319,12 +390,12 @@ class TranslateService {
                 if (sessionSignal) sessionSignal.removeEventListener('abort', onSessionAbort);
                 if (segment.abortController !== segmentAbort) return;
                 segment.streamInFlight = false;
-                // If new whisper text accumulated while we were streaming and the
+                // If new STT text accumulated while we were streaming and the
                 // segment is still active, run another pass with the updated buffer.
                 if (!segmentAbort.signal.aborted
                     && !segment.isFinal
                     && this.activeSegment === segment
-                    && segment.sourceText !== segment.lastSentText) {
+                    && this.shouldRetranslate(segment)) {
                     this.kickoffTranslate(segment, false);
                 }
             });
@@ -332,17 +403,8 @@ class TranslateService {
 
     buildTranslationMessages(sourceText) {
         const messages = [
-            {
-                role: 'system',
-                content: [
-                    'You are a fast, precise English-to-Ukrainian interpreter for live captions.',
-                    'Translate the user text into natural Ukrainian.',
-                    'Output only the Ukrainian translation. No prefaces, no notes, no transliteration.',
-                    'Preserve names, numbers, code identifiers, commands, currencies, URLs and product names verbatim.',
-                    'If the text is incomplete or cuts off mid-sentence, translate exactly what is given without inventing missing words.',
-                    'If the input is already Ukrainian or another non-English language, output it unchanged.',
-                ].join(' '),
-            },
+            { role: 'system', content: TRANSLATION_SYSTEM_PROMPT },
+            ...TRANSLATION_FEW_SHOT,
         ];
 
         if (CONTEXT_TURNS > 0 && this.recentTurns.length > 0) {
@@ -431,6 +493,7 @@ class TranslateService {
 
                     const data = trimmedLine.substring(6);
                     if (data === '[DONE]') {
+                        if (segmentAbort.signal.aborted) return;
                         this.finalizeSegment(segment, fullTranslation, isFinalPass, sourceTextForRequest);
                         return;
                     }
@@ -451,6 +514,10 @@ class TranslateService {
                 }
             }
 
+            // reader.cancel() on abort resolves read() as done, so re-check here:
+            // a stale pass must not clobber segment.translation or wipe the
+            // stabilization snapshot the newer pass just installed.
+            if (segmentAbort.signal.aborted) return;
             this.finalizeSegment(segment, fullTranslation, isFinalPass, sourceTextForRequest);
         } catch (error) {
             if (segmentAbort.signal.aborted) return;
@@ -515,10 +582,14 @@ class TranslateService {
         try {
             this.sendToRenderer('change-translate-capture-state', { status: 'stop' });
 
-            // sttService.closeSessions flushes pending whisper buffer first,
-            // which fires onTranscriptionComplete → handleFinal → kicks off a
-            // final LLM pass for the last ~1-2 unfinished sentences. We then
-            // give that stream a brief window to complete before tearing down.
+            // Stopping mid-sentence means the provider never got to freeze the
+            // last interim, so commit it ourselves before the socket goes away.
+            // Everything before it is already committed chunk by chunk.
+            const pending = this.activeSegment;
+            if (pending && !pending.isFinal && !pending.isFinalizing && pending.sourceText) {
+                this.handleCommit(pending.sourceText);
+            }
+
             await this.sttService.closeSessions();
 
             const waitStart = Date.now();

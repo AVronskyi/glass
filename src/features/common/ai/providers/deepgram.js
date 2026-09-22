@@ -40,10 +40,11 @@ function createSTT({
     apiKey,
     language = 'en-US',
     sampleRate = 24000,
+    model = 'nova-3',
     callbacks = {},
   }) {
     const qs = new URLSearchParams({
-      model: 'nova-3',
+      model: model || 'nova-3',
       encoding: 'linear16',
       sample_rate: sampleRate.toString(),
       language,
