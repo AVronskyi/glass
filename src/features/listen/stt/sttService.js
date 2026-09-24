@@ -6,6 +6,11 @@ const modelStateService = require('../../common/services/modelStateService');
 const COMPLETION_DEBOUNCE_MS = 2000;
 const WHISPER_DUPLICATE_WINDOW_MS = 10 * 1000;
 
+// Providers that hand us one finished transcript per audio chunk (rather than a
+// streaming socket with interim results). They all go through handleWhisperMessage,
+// which previews the chunk as a partial and lets the debounce flush produce the final.
+const CHUNKED_STT_PROVIDERS = new Set(['whisper', 'openrouter']);
+
 // ── New heartbeat / renewal constants ────────────────────────────────────────────
 // Interval to send low-cost keep-alive messages so the remote service does not
 // treat the connection as idle. One minute is safely below the typical 2-5 min
@@ -55,20 +60,25 @@ class SttService {
         // Callbacks
         this.onTranscriptionComplete = null;
         this.onStatusUpdate = null;
-        this.onPartialTranscript = null;
+        this.onStreamSegment = null;
+        this.onStreamTranslation = null;
 
         this.modelInfo = null; 
         this.lastWhisperTranscriptBySpeaker = new Map();
+        // Bumped on every initializeSttSessions so a socket closing after an
+        // auto-renewal can't be mistaken for the current one dying.
+        this.sessionGeneration = 0;
     }
 
     isSpeakerEnabled(speaker) {
         return this.enabledSpeakers.has(speaker);
     }
 
-    setCallbacks({ onTranscriptionComplete, onStatusUpdate, onPartialTranscript }) {
+    setCallbacks({ onTranscriptionComplete, onStatusUpdate, onStreamSegment, onStreamTranslation }) {
         this.onTranscriptionComplete = onTranscriptionComplete;
         this.onStatusUpdate = onStatusUpdate;
-        this.onPartialTranscript = onPartialTranscript;
+        this.onStreamSegment = onStreamSegment;
+        this.onStreamTranslation = onStreamTranslation;
     }
 
     async resolveModelInfoOverride() {
@@ -91,15 +101,65 @@ class SttService {
         }
     }
 
-    emitPartialTranscript(speaker, text) {
-        if (!this.onPartialTranscript) return;
+    // One speech fragment, with the only distinction that matters downstream:
+    // `isCommitted` means the provider has frozen this text and will never revise
+    // it (Deepgram `is_final`, or one finished chunk from a chunked recogniser).
+    // Anything else is an interim that may still change word for word.
+    emitStreamSegment(speaker, text, isCommitted) {
+        if (!this.onStreamSegment) return;
         if (!this.isSpeakerEnabled(speaker)) return;
         const trimmed = String(text || '').trim();
         if (!trimmed) return;
         try {
-            this.onPartialTranscript(speaker, trimmed);
+            this.onStreamSegment(speaker, trimmed, !!isCommitted);
         } catch (err) {
-            console.error('[SttService] onPartialTranscript callback failed:', err);
+            console.error('[SttService] onStreamSegment callback failed:', err);
+        }
+    }
+
+    // Soniox sends the stream as tokens: final ones exactly once (append),
+    // non-final ones re-sent in full on every message (they are the whole
+    // uncommitted tail, so they replace). Translate opens the socket with
+    // translation on, which makes final original tokens arrive as clause-sized
+    // units — the shape of Deepgram's is_final — so each unit is one commit.
+    // Translation tokens only feed onStreamTranslation (the native engine).
+    handleSonioxMessage(speaker, message) {
+        // <end>/<fin> are boundary markers, never text: they must not reach a
+        // fragment, a transcript or an LLM prompt in either engine.
+        const tokens = (message.tokens || []).filter(t => t.text !== '<end>' && t.text !== '<fin>');
+        const join = (isFinal, status) => tokens
+            .filter(t => !!t.is_final === isFinal && t.translation_status === status)
+            .map(t => t.text)
+            .join('');
+
+        const committed = join(true, 'original');
+        const draft = join(false, 'original');
+        if (committed.trim()) this.emitStreamSegment(speaker, committed, true);
+        if (draft.trim()) this.emitStreamSegment(speaker, draft, false);
+
+        if (!this.onStreamTranslation || !this.isSpeakerEnabled(speaker)) return;
+        try {
+            this.onStreamTranslation(speaker, {
+                finals: tokens.filter(t => t.is_final).map(t => ({ text: t.text, status: t.translation_status })),
+                draftOriginal: draft,
+                draftTranslation: join(false, 'translation'),
+            });
+        } catch (err) {
+            console.error('[SttService] onStreamTranslation callback failed:', err);
+        }
+    }
+
+    // A provider websocket can die mid-session (network blip, sleep, provider-side
+    // close). Without this the session pointer stays non-null, isSessionActive()
+    // keeps returning true and the UI still says "Listening" while nothing arrives.
+    handleSessionClosed(speaker, generation) {
+        if (generation !== this.sessionGeneration) return;   // socket from a previous renewal
+        if (!this.modelInfo) return;                         // we're tearing the session down ourselves
+        const key = speaker === 'Me' ? 'mySttSession' : 'theirSttSession';
+        if (!this[key]) return;                              // closed on purpose by closeSessions
+        this[key] = null;
+        if (this.onStatusUpdate) {
+            this.onStatusUpdate('Transcription disconnected. Press Stop, then start again.');
         }
     }
 
@@ -130,7 +190,7 @@ class SttService {
     }
 
     flushMyCompletion() {
-        const finalText = (this.myCompletionBuffer + this.myCurrentUtterance).trim();
+        const finalText = [this.myCompletionBuffer, this.myCurrentUtterance].filter(Boolean).join(' ').trim();
         if (!this.modelInfo || !finalText) return Promise.resolve();
         if (!this.isSpeakerEnabled('Me')) return Promise.resolve();
 
@@ -156,7 +216,7 @@ class SttService {
     }
 
     flushTheirCompletion() {
-        const finalText = (this.theirCompletionBuffer + this.theirCurrentUtterance).trim();
+        const finalText = [this.theirCompletionBuffer, this.theirCurrentUtterance].filter(Boolean).join(' ').trim();
         if (!this.modelInfo || !finalText) return Promise.resolve();
         if (!this.isSpeakerEnabled('Them')) return Promise.resolve();
 
@@ -288,7 +348,7 @@ class SttService {
             isFinal: false,
             timestamp: Date.now(),
         });
-        this.emitPartialTranscript(speaker, previewText);
+        this.emitStreamSegment(speaker, finalText, true);
     }
 
     async initializeSttSessions(language = 'en') {
@@ -302,6 +362,7 @@ class SttService {
             throw new Error('AI model or API key is not configured.');
         }
         this.modelInfo = modelInfo;
+        const generation = ++this.sessionGeneration;
         console.log(`[SttService] Initializing STT for ${modelInfo.provider} using model ${modelInfo.model}`);
 
         const handleMyMessage = message => {
@@ -311,7 +372,7 @@ class SttService {
             }
             // console.log('[SttService] handleMyMessage', message);
             
-            if (this.modelInfo.provider === 'whisper') {
+            if (CHUNKED_STT_PROVIDERS.has(this.modelInfo.provider)) {
                 this.handleWhisperMessage('Me', message);
                 return;
             } else if (this.modelInfo.provider === 'gemini') {
@@ -416,7 +477,7 @@ class SttService {
                 return;
             }
             
-            if (this.modelInfo.provider === 'whisper') {
+            if (CHUNKED_STT_PROVIDERS.has(this.modelInfo.provider)) {
                 this.handleWhisperMessage('Them', message);
                 return;
             } else if (this.modelInfo.provider === 'gemini') {
@@ -449,7 +510,6 @@ class SttService {
                     isFinal: false,
                     timestamp: Date.now(),
                 });
-                this.emitPartialTranscript('Them', this.theirCompletionBuffer);
 
             // Deepgram
             } else if (this.modelInfo.provider === 'deepgram') {
@@ -461,6 +521,19 @@ class SttService {
                 if (isFinal) {
                     this.theirCurrentUtterance = ''; 
                     this.debounceTheirCompletion(text); 
+
+                    // Without this the caption freezes until the debounce flush
+                    // whenever Deepgram emits finals back-to-back with no interim
+                    // between them — which is exactly what fast continuous speech does.
+                    this.sendTranscriptUpdate({
+                        speaker: 'Them',
+                        text: this.theirCompletionBuffer,
+                        isPartial: true,
+                        isFinal: false,
+                        timestamp: Date.now(),
+                    });
+                    // Deepgram will never revise this range again — it is a commit point.
+                    this.emitStreamSegment('Them', text, true);
                 } else {
                     if (this.theirCompletionTimer) clearTimeout(this.theirCompletionTimer);
                     this.theirCompletionTimer = null;
@@ -476,9 +549,12 @@ class SttService {
                         isFinal: false,
                         timestamp: Date.now(),
                     });
-                    this.emitPartialTranscript('Them', continuousText);
+                    // Only the interim itself: everything before it is already committed.
+                    this.emitStreamSegment('Them', text, false);
                 }
 
+            } else if (this.modelInfo.provider === 'soniox') {
+                this.handleSonioxMessage('Them', message);
             } else {
                 const type = message.type;
                 const text = message.transcript || message.delta || (message.alternatives && message.alternatives[0]?.transcript) || '';
@@ -495,7 +571,6 @@ class SttService {
                             isFinal: false,
                             timestamp: Date.now(),
                         });
-                        this.emitPartialTranscript('Them', continuousText);
                     }
                 } else if (type === 'conversation.item.input_audio_transcription.completed') {
                     if (text && text.trim()) {
@@ -516,7 +591,10 @@ class SttService {
             callbacks: {
                 onmessage: handleMyMessage,
                 onerror: error => console.error('My STT session error:', error.message),
-                onclose: event => console.log('My STT session closed:', event.reason),
+                onclose: event => {
+                    console.log('My STT session closed:', event?.reason);
+                    this.handleSessionClosed('Me', generation);
+                },
             },
         };
         
@@ -525,12 +603,17 @@ class SttService {
             callbacks: {
                 onmessage: handleTheirMessage,
                 onerror: error => console.error('Their STT session error:', error.message),
-                onclose: event => console.log('Their STT session closed:', event.reason),
+                onclose: event => {
+                    console.log('Their STT session closed:', event?.reason);
+                    this.handleSessionClosed('Them', generation);
+                },
             },
         };
         
+        // Like modelInfoOverride, may be a function resolved per session.
+        const providerOptions = typeof this.providerOptions === 'function' ? this.providerOptions() : this.providerOptions;
         const sttOptions = {
-            ...this.providerOptions,
+            ...providerOptions,
             apiKey: this.modelInfo.apiKey,
             model: this.modelInfo.model,
             language: effectiveLanguage,
@@ -577,8 +660,11 @@ class SttService {
         }, KEEP_ALIVE_INTERVAL_MS);
 
         // ── Schedule session auto-renewal ───────────────────────────────────────
+        // Not for Soniox: a stream may run 300 min, and the 2 s overlap would feed
+        // two sockets' final tokens into one fragment flow. Past 300 min the
+        // server closes it and handleSessionClosed reports the drop.
         if (this.sessionRenewTimeout) clearTimeout(this.sessionRenewTimeout);
-        this.sessionRenewTimeout = setTimeout(async () => {
+        this.sessionRenewTimeout = this.modelInfo.provider === 'soniox' ? null : setTimeout(async () => {
             try {
                 console.log('[SttService] Auto-renewing STT sessions…');
                 await this.renewSessions(language);

@@ -1,3 +1,5 @@
 {
-    "search.useIgnoreFiles": true
+    "search.useIgnoreFiles": true,
+    "sarif-viewer.connectToGithubCodeScanning": "off",
+    "codeQL.githubDatabase.download": "never"
 }

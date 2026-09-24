@@ -128,6 +128,8 @@ module.exports = {
     ipcMain.handle('translate:startMacosSystemAudio', async () => await translateService.handleStartMacosAudio());
     ipcMain.handle('translate:stopMacosSystemAudio', async () => await translateService.handleStopMacosAudio());
     ipcMain.handle('translate:isSessionActive', async () => await translateService.isSessionActive());
+    ipcMain.handle('translate:get-engines', async () => await translateService.getEngineOptions());
+    ipcMain.handle('translate:set-engine', async (event, engineId) => await translateService.setEngine(engineId));
     ipcMain.handle('translate:changeSession', async (event, translateButtonText) => {
       console.log('[FeatureBridge] translate:changeSession from mainheader', translateButtonText);
       try {

@@ -495,6 +495,9 @@ export class SettingsView extends LitElement {
         selectedStt: { type: String, state: true },
         isLlmListVisible: { type: Boolean },
         isSttListVisible: { type: Boolean },
+        translateEngines: { type: Array, state: true },
+        selectedTranslateEngine: { type: String, state: true },
+        isTranslateEngineListVisible: { type: Boolean },
         presets: { type: Array, state: true },
         selectedPreset: { type: Object, state: true },
         showPresets: { type: Boolean, state: true },
@@ -526,6 +529,9 @@ export class SettingsView extends LitElement {
         this.selectedStt = null;
         this.isLlmListVisible = false;
         this.isSttListVisible = false;
+        this.translateEngines = [];
+        this.selectedTranslateEngine = null;
+        this.isTranslateEngineListVisible = false;
         this.presets = [];
         this.selectedPreset = null;
         this.showPresets = false;
@@ -574,6 +580,34 @@ export class SettingsView extends LitElement {
             console.error('Error toggling auto-update:', e);
         }
         this.autoUpdateLoading = false;
+        this.requestUpdate();
+    }
+
+    // Translate picks its own STT/translation pair; this list does not touch Listen.
+    async loadTranslateEngines() {
+        if (!window.api) return;
+        try {
+            const { engines, selected } = await window.api.settingsView.getTranslateEngines();
+            this.translateEngines = engines || [];
+            this.selectedTranslateEngine = selected;
+        } catch (e) {
+            console.error('Error loading translate engines:', e);
+        }
+        this.requestUpdate();
+    }
+
+    async toggleTranslateEngineList() {
+        if (!this.isTranslateEngineListVisible) await this.loadTranslateEngines();
+        this.isTranslateEngineListVisible = !this.isTranslateEngineListVisible;
+        this.requestUpdate();
+    }
+
+    async selectTranslateEngine(engineId) {
+        this.saving = true;
+        const result = await window.api.settingsView.setTranslateEngine(engineId);
+        if (result?.success) this.selectedTranslateEngine = engineId;
+        this.isTranslateEngineListVisible = false;
+        this.saving = false;
         this.requestUpdate();
     }
 
@@ -935,6 +969,7 @@ export class SettingsView extends LitElement {
         this.setupIpcListeners();
         this.setupWindowResize();
         this.loadAutoUpdateSetting();
+        this.loadTranslateEngines();
         // Force one height calculation immediately (innerHeight may be 0 at first)
         setTimeout(() => this.updateScrollHeight(), 0);
     }
@@ -1369,6 +1404,22 @@ export class SettingsView extends LitElement {
                                     </div>
                                 `;
                             })}
+                        </div>
+                    ` : ''}
+                </div>
+                <div class="model-select-group">
+                    <label>Translate Engine: <strong>${this.translateEngines.find(e => e.id === this.selectedTranslateEngine)?.name || 'Not Set'}</strong></label>
+                    <button class="settings-button full-width" @click=${this.toggleTranslateEngineList} ?disabled=${this.saving || this.translateEngines.length === 0}>
+                        Change Translate Engine
+                    </button>
+                    ${this.isTranslateEngineListVisible ? html`
+                        <div class="model-list">
+                            ${this.translateEngines.map(engine => html`
+                                <div class="model-item ${this.selectedTranslateEngine === engine.id ? 'selected' : ''}"
+                                     @click=${() => this.selectTranslateEngine(engine.id)}>
+                                    <span>${engine.name}</span>
+                                </div>
+                            `)}
                         </div>
                     ` : ''}
                 </div>
