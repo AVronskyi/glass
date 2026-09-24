@@ -65,6 +65,14 @@ const PROVIDERS = {
         { id: 'nova-3', name: 'Nova-3 (General)' },
         ],
     },
+  // Translate-only STT: no models listed, so it is neither selectable in Listen
+  // nor enough to pass first-run setup, but Settings still shows its key field.
+  'soniox': {
+      name: 'Soniox',
+      handler: () => require("./providers/soniox"),
+      llmModels: [],
+      sttModels: [],
+  },
   'openrouter': {
       name: 'OpenRouter',
       handler: () => require("./providers/openrouter"),
@@ -168,7 +176,8 @@ function getProviderClass(providerId) {
         'deepgram': 'DeepgramProvider',
         'ollama': 'OllamaProvider',
         'whisper': 'WhisperProvider',
-        'openrouter': 'OpenRouterProvider'
+        'openrouter': 'OpenRouterProvider',
+        'soniox': 'SonioxProvider'
     };
     
     const className = classNameMap[actualProviderId];

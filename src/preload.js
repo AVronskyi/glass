@@ -235,7 +235,9 @@ contextBridge.exposeInMainWorld('api', {
     saveApiKey: (key) => ipcRenderer.invoke('model:save-api-key', key),
     removeApiKey: (provider) => ipcRenderer.invoke('model:remove-api-key', provider),
     setSelectedModel: (data) => ipcRenderer.invoke('model:set-selected-model', data),
-    
+    getTranslateEngines: () => ipcRenderer.invoke('translate:get-engines'),
+    setTranslateEngine: (engineId) => ipcRenderer.invoke('translate:set-engine', engineId),
+
     // Ollama Management
     getOllamaStatus: () => ipcRenderer.invoke('ollama:get-status'),
     ensureOllamaReady: () => ipcRenderer.invoke('ollama:ensure-ready'),

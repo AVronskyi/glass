@@ -290,6 +290,7 @@ export class TranslateView extends LitElement {
         elapsedTime: { type: String },
         isSessionActive: { type: Boolean },
         copyState: { type: String },
+        engineLabel: { type: String },
     };
 
     constructor() {
@@ -300,6 +301,7 @@ export class TranslateView extends LitElement {
         this.elapsedTime = '00:00';
         this.isSessionActive = false;
         this.copyState = 'idle';
+        this.engineLabel = '';
         this.timerInterval = null;
         this.captureStartTime = null;
         this.copyTimeout = null;
@@ -342,9 +344,11 @@ export class TranslateView extends LitElement {
         }
     }
 
-    handleSessionStateChanged(event, { isActive }) {
+    handleSessionStateChanged(event, { isActive, engineLabel }) {
         const wasActive = this.isSessionActive;
         this.isSessionActive = isActive;
+        // Sent on start only; kept afterwards so a stopped session still says what it was.
+        if (engineLabel) this.engineLabel = engineLabel;
 
         if (!wasActive && isActive) {
             this.translations = [];
@@ -544,7 +548,7 @@ export class TranslateView extends LitElement {
             <div class="translate-container">
                 <div class="top-bar">
                     <div class="title-group">
-                        <div class="title">English -> Ukrainian</div>
+                        <div class="title">${this.engineLabel ? `EN → UK · ${this.engineLabel}` : 'English -> Ukrainian'}</div>
                         <div class="status">${this.statusText}</div>
                     </div>
                     <div class="bar-controls">

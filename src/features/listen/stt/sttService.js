@@ -61,6 +61,7 @@ class SttService {
         this.onTranscriptionComplete = null;
         this.onStatusUpdate = null;
         this.onStreamSegment = null;
+        this.onStreamTranslation = null;
 
         this.modelInfo = null; 
         this.lastWhisperTranscriptBySpeaker = new Map();
@@ -73,10 +74,11 @@ class SttService {
         return this.enabledSpeakers.has(speaker);
     }
 
-    setCallbacks({ onTranscriptionComplete, onStatusUpdate, onStreamSegment }) {
+    setCallbacks({ onTranscriptionComplete, onStatusUpdate, onStreamSegment, onStreamTranslation }) {
         this.onTranscriptionComplete = onTranscriptionComplete;
         this.onStatusUpdate = onStatusUpdate;
         this.onStreamSegment = onStreamSegment;
+        this.onStreamTranslation = onStreamTranslation;
     }
 
     async resolveModelInfoOverride() {
@@ -112,6 +114,38 @@ class SttService {
             this.onStreamSegment(speaker, trimmed, !!isCommitted);
         } catch (err) {
             console.error('[SttService] onStreamSegment callback failed:', err);
+        }
+    }
+
+    // Soniox sends the stream as tokens: final ones exactly once (append),
+    // non-final ones re-sent in full on every message (they are the whole
+    // uncommitted tail, so they replace). Translate opens the socket with
+    // translation on, which makes final original tokens arrive as clause-sized
+    // units — the shape of Deepgram's is_final — so each unit is one commit.
+    // Translation tokens only feed onStreamTranslation (the native engine).
+    handleSonioxMessage(speaker, message) {
+        // <end>/<fin> are boundary markers, never text: they must not reach a
+        // fragment, a transcript or an LLM prompt in either engine.
+        const tokens = (message.tokens || []).filter(t => t.text !== '<end>' && t.text !== '<fin>');
+        const join = (isFinal, status) => tokens
+            .filter(t => !!t.is_final === isFinal && t.translation_status === status)
+            .map(t => t.text)
+            .join('');
+
+        const committed = join(true, 'original');
+        const draft = join(false, 'original');
+        if (committed.trim()) this.emitStreamSegment(speaker, committed, true);
+        if (draft.trim()) this.emitStreamSegment(speaker, draft, false);
+
+        if (!this.onStreamTranslation || !this.isSpeakerEnabled(speaker)) return;
+        try {
+            this.onStreamTranslation(speaker, {
+                finals: tokens.filter(t => t.is_final).map(t => ({ text: t.text, status: t.translation_status })),
+                draftOriginal: draft,
+                draftTranslation: join(false, 'translation'),
+            });
+        } catch (err) {
+            console.error('[SttService] onStreamTranslation callback failed:', err);
         }
     }
 
@@ -519,6 +553,8 @@ class SttService {
                     this.emitStreamSegment('Them', text, false);
                 }
 
+            } else if (this.modelInfo.provider === 'soniox') {
+                this.handleSonioxMessage('Them', message);
             } else {
                 const type = message.type;
                 const text = message.transcript || message.delta || (message.alternatives && message.alternatives[0]?.transcript) || '';
@@ -574,8 +610,10 @@ class SttService {
             },
         };
         
+        // Like modelInfoOverride, may be a function resolved per session.
+        const providerOptions = typeof this.providerOptions === 'function' ? this.providerOptions() : this.providerOptions;
         const sttOptions = {
-            ...this.providerOptions,
+            ...providerOptions,
             apiKey: this.modelInfo.apiKey,
             model: this.modelInfo.model,
             language: effectiveLanguage,
@@ -622,8 +660,11 @@ class SttService {
         }, KEEP_ALIVE_INTERVAL_MS);
 
         // ── Schedule session auto-renewal ───────────────────────────────────────
+        // Not for Soniox: a stream may run 300 min, and the 2 s overlap would feed
+        // two sockets' final tokens into one fragment flow. Past 300 min the
+        // server closes it and handleSessionClosed reports the drop.
         if (this.sessionRenewTimeout) clearTimeout(this.sessionRenewTimeout);
-        this.sessionRenewTimeout = setTimeout(async () => {
+        this.sessionRenewTimeout = this.modelInfo.provider === 'soniox' ? null : setTimeout(async () => {
             try {
                 console.log('[SttService] Auto-renewing STT sessions…');
                 await this.renewSessions(language);
